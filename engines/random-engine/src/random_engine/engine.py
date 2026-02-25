@@ -96,8 +96,6 @@ class RandomEngine:
                 raise ValueError(f"Invalid move notation: {uci_move!r}") from exc
 
             if move not in self.board.legal_moves:
-                raise ValueError(
-                    f"Illegal move {uci_move!r} in position {self.board.fen()!r}"
-                )
+                raise ValueError(f"Illegal move {uci_move!r} in position {self.board.fen()!r}")
 
             self.board.push(move)

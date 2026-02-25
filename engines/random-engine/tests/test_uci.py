@@ -176,9 +176,7 @@ class TestGoCommand:
         """In a terminal position, bestmove (none) should be reported."""
         # Fool's Mate position — checkmate.
         fool_moves = ["f2f3", "e7e5", "g2g4", "d8h4"]
-        lines = _run_handler(
-            [f"position startpos moves {' '.join(fool_moves)}", "go", "quit"]
-        )
+        lines = _run_handler([f"position startpos moves {' '.join(fool_moves)}", "go", "quit"])
         assert any(line == "bestmove (none)" for line in lines)
 
 
