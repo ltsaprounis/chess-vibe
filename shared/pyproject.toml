@@ -26,4 +26,5 @@ dev = [
     "pyright",
     "pytest",
     "pytest-asyncio",
+    "pytest-cov",
 ]

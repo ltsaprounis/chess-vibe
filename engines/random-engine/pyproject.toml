@@ -25,4 +25,5 @@ dev = [
     "ruff",
     "pyright",
     "pytest",
+    "pytest-cov",
 ]
