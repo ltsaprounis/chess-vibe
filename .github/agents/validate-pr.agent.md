@@ -4,8 +4,8 @@
 # To make this agent available, merge this file into the default repository branch.
 # For format details, see: https://gh.io/customagents/config
 
-name:validate-pr
-description: Takes a pull request and validates it thoroughly — code review, CI status, and frontend E2E validation via Playwright
+name: validate-pr
+description: Takes a pull request and validates it thoroughly. Code review, CI status, and frontend E2E validation via Playwright
 ---
 
 # Validate Agent
