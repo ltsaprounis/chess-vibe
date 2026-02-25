@@ -1,0 +1,32 @@
+[project]
+name = "sprt-runner"
+version = "0.1.0"
+description = "SPRT testing framework for chess engines"
+requires-python = ">=3.14"
+dependencies = [
+    "shared",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sprt_runner"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+
+[tool.uv.sources]
+shared = { path = "../shared" }
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "pyright",
+    "pytest",
+    "pytest-asyncio",
+]
