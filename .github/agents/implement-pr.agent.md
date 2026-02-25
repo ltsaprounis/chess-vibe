@@ -4,7 +4,7 @@
 # To make this agent available, merge this file into the default repository branch.
 # For format details, see: https://gh.io/customagents/config
 
-name: implement
+name: implement-pr
 description: takes a github issue and implements a PR
 ---
 
