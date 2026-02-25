@@ -136,7 +136,7 @@ class UCIHandler:
 
         if args[0] == "startpos":
             # Extract optional move list after "moves" keyword
-            moves = _extract_moves(args[1:])
+            moves = extract_moves(args[1:])
             self._engine.set_position_startpos(moves=moves)
 
         elif args[0] == "fen":
@@ -153,7 +153,7 @@ class UCIHandler:
                 rest = []
 
             fen = " ".join(fen_tokens)
-            moves = _extract_moves(rest)
+            moves = extract_moves(rest)
             self._engine.set_position_fen(fen, moves=moves)
 
         else:
@@ -205,7 +205,7 @@ class UCIHandler:
 # ------------------------------------------------------------------
 
 
-def _extract_moves(tokens: list[str]) -> list[str]:
+def extract_moves(tokens: list[str]) -> list[str]:
     """Extract the move list from tokens following a 'moves' keyword.
 
     Args:

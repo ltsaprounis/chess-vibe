@@ -1,12 +1,14 @@
 """Tests for UCI protocol compliance (mock stdin/stdout)."""
 
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
 import io
 from unittest.mock import patch
 
 from random_engine.engine import RandomEngine
-from random_engine.uci import UCIHandler, _extract_moves
+from random_engine.uci import UCIHandler, extract_moves
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -52,14 +54,14 @@ class TestExtractMoves:
     """Tests for the _extract_moves module-level helper."""
 
     def test_returns_empty_when_no_moves_keyword(self) -> None:
-        assert _extract_moves([]) == []
-        assert _extract_moves(["e2e4"]) == []
+        assert extract_moves([]) == []
+        assert extract_moves(["e2e4"]) == []
 
     def test_returns_moves_after_keyword(self) -> None:
-        assert _extract_moves(["moves", "e2e4", "e7e5"]) == ["e2e4", "e7e5"]
+        assert extract_moves(["moves", "e2e4", "e7e5"]) == ["e2e4", "e7e5"]
 
     def test_moves_keyword_only_returns_empty(self) -> None:
-        assert _extract_moves(["moves"]) == []
+        assert extract_moves(["moves"]) == []
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +158,11 @@ class TestGoCommand:
         handler = UCIHandler(engine)
 
         output: list[str] = []
-        with patch("builtins.print", side_effect=lambda msg, **_kw: output.append(msg)):
+
+        def _capture(msg: str, **_kw: object) -> None:
+            output.append(msg)
+
+        with patch("builtins.print", side_effect=_capture):
             handler._handle_go()
 
         bestmove_lines = [ln for ln in output if ln.startswith("bestmove ")]
@@ -210,9 +216,13 @@ class TestQuitCommand:
     def test_quit_stops_the_loop(self) -> None:
         """After quit, no further commands should be processed."""
         output: list[str] = []
+
+        def _capture(msg: str, **_kw: object) -> None:
+            output.append(msg)
+
         with (
             patch("sys.stdin", io.StringIO("quit\nisready\n")),
-            patch("builtins.print", side_effect=lambda msg, **_kw: output.append(msg)),
+            patch("builtins.print", side_effect=_capture),
         ):
             engine = RandomEngine()
             handler = UCIHandler(engine)

@@ -56,6 +56,9 @@ jobs:
       - name: Type-check backend
         run: cd backend && uv sync --dev && uv run pyright
 
+      - name: Type-check engines/random-engine
+        run: cd engines/random-engine && uv sync --dev && uv run pyright
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
