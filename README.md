@@ -1,2 +1,12 @@
 # chess-vibe
-An application for facilitating the development of chess bots (playing, testing, SPRT tests). Code is mostly AI generated.
+
+A development suite for building and testing chess engines — play games, run SPRT tests, and track progress.
+
+## Stack
+
+| Component | Tech |
+|---|---|
+| Backend | Python 3.14+, FastAPI |
+| SPRT Runner | Python 3.14+, asyncio + multiprocessing |
+| Shared lib | Python 3.14+, python-chess |
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS |
