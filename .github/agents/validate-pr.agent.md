@@ -10,7 +10,7 @@ description: Takes a pull request and validates it thoroughly. Code review, CI s
 
 # Validate Agent
 
-Validates an existing pull request — code review, CI status, and frontend E2E validation via Playwright. Operates entirely via GitHub — no local environment.
+Validates an existing pull request — code review, CI status, and frontend E2E validation via Playwright.
 
 ## Constraints
 
