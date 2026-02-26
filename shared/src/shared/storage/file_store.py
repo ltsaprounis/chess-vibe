@@ -248,19 +248,23 @@ def _matches_game_filter(game: Game, game_filter: GameFilter) -> bool:
         game.black_engine,
     ):
         return False
-    return not (
+    if (  # noqa: SIM103
         game_filter.opening_name is not None and game.opening_name != game_filter.opening_name
-    )
+    ):
+        return False
+    return True
 
 
 def _matches_sprt_filter(test: SPRTTest, test_filter: SPRTTestFilter) -> bool:
     """Return ``True`` if *test* satisfies all criteria in *test_filter*."""
     if test_filter.status is not None and test.status != test_filter.status:
         return False
-    return not (
+    if (  # noqa: SIM103
         test_filter.engine_id is not None
         and test_filter.engine_id not in (test.engine_a, test.engine_b)
-    )
+    ):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

@@ -92,8 +92,6 @@ def export_game_to_pgn(game: Game) -> str:
         if comment:
             node.comment = comment
 
-    pgn_game.headers["Result"] = game.result.value
-
     # -- Export -----------------------------------------------------------
     exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=True)
     pgn_str: str = pgn_game.accept(exporter)
