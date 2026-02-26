@@ -6,6 +6,7 @@
 
 name: implement-pr
 description: takes a github issue and implements a PR
+target: github-copilot
 ---
 
 # Implement Agent
@@ -20,6 +21,14 @@ You are an implementation agent for the chess-vibe monorepo. You receive a GitHu
 
 Before implementing, review [`.github/prompts/architecture.md`](../../.github/prompts/architecture.md) for architecture principles, component boundaries, and the high-level system diagram. All implementations must respect these boundaries.
 
+### Boundary Enforcement (Hard Fail)
+
+Reject implementation approaches that violate core architecture invariants:
+
+- Do not import or depend on engine internals from any infrastructure component. Engines are opaque UCI subprocesses.
+- Do not bypass `shared/storage/repository.py` ABCs for persistence access. No direct `data/` filesystem reads/writes from callers.
+- Do not couple backend internals to SPRT runner internals. Backend must invoke SPRT as a CLI subprocess and consume JSON-lines stdout only.
+
 ### Workflow
 
 1. **Read the issue** — Use the GitHub MCP server to fetch the issue body, labels, and comments from `ltsaprounis/chess-vibe`.
@@ -27,17 +36,26 @@ Before implementing, review [`.github/prompts/architecture.md`](../../.github/pr
 3. **Create a branch** — Use the GitHub MCP server to create a branch from `main` using conventional naming: `feat/<short-description>`, `fix/<short-description>`, etc.
 4. **Plan** — Break the issue into small, testable tasks. Use the todo list to track progress.
 5. **Implement with TDD** — For each task:
+   - **Component-scoped test requirement (mandatory, before implementation):**
+     - **Python components** (`shared/`, `sprt-runner/`, `backend/`): add or update `pytest` tests in that component's `tests/` area.
+     - **Frontend** (`frontend/`): add or update `Vitest` + React Testing Library tests for affected hooks/components/pages.
+     - If multiple components are changed, each affected component must receive corresponding test updates.
    - **Red**: Write a failing test first.
    - **Green**: Write the minimal code to pass.
    - **Refactor**: Clean up while tests stay green.
    - Push files to the branch using the GitHub MCP server (`create_or_update_file` / `push_files`).
-6. **Open a PR** — Use the GitHub MCP server to create a pull request. Reference the issue (`Closes #<number>`). Include a summary of changes.
+6. **Open a PR** — Use the GitHub MCP server to create a pull request. Reference the issue (`Closes #<number>`). Include a summary of changes and a required section titled `## Architecture Impact` with:
+   - **Boundary touched**: Which architecture boundary/boundaries changed
+   - **Why safe**: Why invariants remain intact
+   - **Tests added/updated**: Exact component-scoped test coverage
+   - **Cross-process protocol changes**: Whether REST/WS/JSON-lines/subprocess contracts changed (and how)
 7. **Let CI validate** — The GitHub Actions CI pipeline runs tests, linting, type checking, and formatting on every push. Monitor the CI status; if checks fail, read the logs, fix the issues, and push corrections.
 
 ### Rules
 
 - Follow all coding conventions from `.github/copilot-instructions.md`.
 - Never modify files under `engines/my-engine/`.
+- Never implement architecture violations: no engine-internal imports, no repository ABC bypass, no backend↔runner internal coupling.
 - Every public function, route, and component must have tests.
 - No `print()` in production code — use `logging`.
 - Type hints on all Python function signatures. Pyright strict must pass.
