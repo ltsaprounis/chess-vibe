@@ -22,6 +22,10 @@ echo "==> Pyright (backend) ..."
 cd "$REPO_ROOT/backend"
 uv run pyright
 
+echo "==> Pyright (engines/random-engine) ..."
+cd "$REPO_ROOT/engines/random-engine"
+uv run pyright
+
 echo "==> ESLint (frontend) ..."
 cd "$REPO_ROOT/frontend"
 npx eslint src/
