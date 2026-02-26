@@ -470,9 +470,7 @@ async def run_sprt(config: RunConfig) -> None:
         # Handle result
         if worker_result.error is not None:
             print(
-                format_error_message(
-                    f"Game {worker_result.game_id} failed: {worker_result.error}"
-                ),
+                format_error_message(f"Game {worker_result.game_id} failed: {worker_result.error}"),
                 flush=True,
             )
             continue

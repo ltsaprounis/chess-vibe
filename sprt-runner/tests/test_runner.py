@@ -12,9 +12,9 @@ from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig
 from sprt_runner.runner import (
     RunConfig,
+    _worker_entry,
     _WorkerResult,
     _WorkerTask,
-    _worker_entry,
     format_complete_message,
     format_error_message,
     format_game_result_message,

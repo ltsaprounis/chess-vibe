@@ -164,7 +164,7 @@ async def resolve_engine_path(
     registry_path = effective_root / "engines.json"
     try:
         entries = load_registry(registry_path)
-    except EngineRegistryError:
+    except EngineRegistryError as e:
         if effective_root != repo_root:
             logger.info(
                 "engines.json not found in worktree %s, falling back to %s",
@@ -179,7 +179,7 @@ async def resolve_engine_path(
                     f"Cannot read registry at '{fallback_path}' (fallback): {e2}"
                 ) from e2
         else:
-            raise WorktreeError(f"Cannot read registry at '{registry_path}'")
+            raise WorktreeError(f"Cannot read registry at '{registry_path}'") from e
 
     # Find the engine entry
     entry = None
