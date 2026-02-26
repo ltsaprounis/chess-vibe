@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,7 +17,7 @@ from sprt_runner.game import (
 )
 
 
-def _mock_engine(moves: list[str], scores: list[UCIScore | None] | None = None) -> MagicMock:
+def _mock_engine(moves: list[str], scores: Sequence[UCIScore | None] | None = None) -> MagicMock:
     """Create a mock UCI client with scripted responses.
 
     Args:
@@ -32,12 +33,13 @@ def _mock_engine(moves: list[str], scores: list[UCIScore | None] | None = None) 
     engine.stop = AsyncMock()
     engine.is_running = True
 
-    if scores is None:
-        scores = [UCIScore(cp=0)] * len(moves)
+    resolved_scores: list[UCIScore | None] = (
+        list(scores) if scores is not None else [UCIScore(cp=0)] * len(moves)
+    )
 
     go_results: list[tuple[BestMove, list[UCIInfo]]] = []
     for i, move in enumerate(moves):
-        score = scores[i] if i < len(scores) else UCIScore(cp=0)
+        score = resolved_scores[i] if i < len(resolved_scores) else UCIScore(cp=0)
         info = UCIInfo(depth=10, score=score, pv=[move])
         go_results.append((BestMove(move=move), [info]))
 

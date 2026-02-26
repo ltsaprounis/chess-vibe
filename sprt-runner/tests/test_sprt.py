@@ -18,7 +18,7 @@ class TestEloToScore:
     """Tests for logistic Elo to expected score conversion."""
 
     def test_zero_elo_gives_half(self) -> None:
-        assert elo_to_score(0.0) == pytest.approx(0.5)
+        assert elo_to_score(0.0) == pytest.approx(0.5)  # type: ignore[reportUnknownMemberType]
 
     def test_positive_elo_above_half(self) -> None:
         score = elo_to_score(100.0)
@@ -34,15 +34,15 @@ class TestEloToScore:
         """Score for +N and -N should sum to 1.0."""
         s_pos = elo_to_score(50.0)
         s_neg = elo_to_score(-50.0)
-        assert s_pos + s_neg == pytest.approx(1.0)
+        assert s_pos + s_neg == pytest.approx(1.0)  # type: ignore[reportUnknownMemberType]
 
     def test_large_positive_elo(self) -> None:
         score = elo_to_score(800.0)
-        assert score == pytest.approx(1.0, abs=0.01)
+        assert score == pytest.approx(1.0, abs=0.01)  # type: ignore[reportUnknownMemberType]
 
     def test_large_negative_elo(self) -> None:
         score = elo_to_score(-800.0)
-        assert score == pytest.approx(0.0, abs=0.01)
+        assert score == pytest.approx(0.0, abs=0.01)  # type: ignore[reportUnknownMemberType]
 
 
 class TestSPRTBounds:
@@ -53,8 +53,8 @@ class TestSPRTBounds:
         # Lower bound should be log(beta / (1 - alpha))
         expected_lower = math.log(0.05 / 0.95)
         expected_upper = math.log(0.95 / 0.05)
-        assert lower == pytest.approx(expected_lower)
-        assert upper == pytest.approx(expected_upper)
+        assert lower == pytest.approx(expected_lower)  # type: ignore[reportUnknownMemberType]
+        assert upper == pytest.approx(expected_upper)  # type: ignore[reportUnknownMemberType]
 
     def test_asymmetric_bounds(self) -> None:
         lower, upper = sprt_bounds(alpha=0.05, beta=0.10)
