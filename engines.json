@@ -1,0 +1,9 @@
+[
+  {
+    "id": "random-engine",
+    "name": "Random Engine",
+    "dir": "engines/random-engine",
+    "build": "uv venv .venv && uv pip install --python .venv/bin/python -e .",
+    "run": ".venv/bin/python -m random_engine"
+  }
+]

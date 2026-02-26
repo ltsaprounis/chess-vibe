@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "engines.schema.json",
+  "title": "Engine Registry",
+  "description": "Schema for engines.json — declares available chess engines. All paths are relative to the repo root. Adding a new engine requires only a new JSON entry.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["id", "name", "dir", "build", "run"],
+    "additionalProperties": false,
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Unique identifier for the engine (e.g. 'random-engine'). Used as a key in config and CLI flags.",
+        "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+      },
+      "name": {
+        "type": "string",
+        "description": "Human-readable display name shown in the UI (e.g. 'Random Engine')."
+      },
+      "dir": {
+        "type": "string",
+        "description": "Path to the engine directory relative to the repo root (e.g. 'engines/random-engine')."
+      },
+      "build": {
+        "type": ["string", "null"],
+        "description": "Shell command to build the engine, run from 'dir'. Use null for pre-built binaries. Examples: 'uv venv .venv && uv pip install --python .venv/bin/python -e .' (Python), 'cmake -B build && cmake --build build' (C++), 'cargo build --release' (Rust)."
+      },
+      "run": {
+        "type": "string",
+        "description": "Shell command to launch the UCI engine binary, run from 'dir'. Must start a process that speaks the UCI protocol on stdin/stdout (e.g. '.venv/bin/python -m random_engine')."
+      }
+    }
+  },
+  "minItems": 0
+}
