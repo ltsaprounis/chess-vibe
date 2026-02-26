@@ -66,7 +66,8 @@ Request changes if any of the following are detected:
    - Interact with components (chessboard, engine selector, SPRT dashboard).
    - Verify: pages render without errors, WebSocket connections establish, UI elements are interactive, forms submit correctly.
    - If no preview/Codespace URL is available, treat E2E as **non-blocking**: do not fail solely for missing environment. Add explicit PR review comments listing what could not be validated and why.
-7. **Report results** — Submit a PR review via the GitHub MCP server:
+7. **Create validation report** — Prepare a concise validation report that summarizes CI status, architecture/boundary checks, code review findings, E2E outcomes, and any non-blocking validation gaps.
+8. **Submit review** — Submit a PR review via the GitHub MCP server using the prepared report:
    - **Approve** if CI passes and code quality is good.
    - **Request changes** if issues are found — leave specific, actionable review comments on the relevant lines.
 
