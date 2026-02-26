@@ -5,7 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from sprt_runner.openings import OpeningPair, load_epd_openings, make_opening_pairs
+from sprt_runner.openings import (
+    OpeningPair,
+    load_epd_openings,
+    load_openings,
+    load_pgn_openings,
+    make_opening_pairs,
+)
 
 
 @pytest.fixture
@@ -110,3 +116,71 @@ class TestOpeningPair:
         p1 = OpeningPair(fen="fen1", swap_colors=True)
         p2 = OpeningPair(fen="fen1", swap_colors=True)
         assert p1 == p2
+
+
+class TestLoadPGNOpenings:
+    """Tests for PGN opening book loading."""
+
+    @pytest.fixture
+    def pgn_file(self, tmp_path: Path) -> Path:
+        """Create a sample PGN file with two games."""
+        content = (
+            '[Event "Test"]\n'
+            '[Result "*"]\n'
+            "\n"
+            "1. e4 e5 *\n"
+            "\n"
+            '[Event "Test2"]\n'
+            '[Result "*"]\n'
+            "\n"
+            "1. d4 d5 2. c4 *\n"
+        )
+        pgn_path = tmp_path / "openings.pgn"
+        pgn_path.write_text(content)
+        return pgn_path
+
+    def test_load_pgn_returns_fens(self, pgn_file: Path) -> None:
+        fens = load_pgn_openings(pgn_file)
+        assert len(fens) == 2
+
+    def test_load_pgn_replays_moves(self, pgn_file: Path) -> None:
+        """FEN should reflect position after all moves played."""
+        fens = load_pgn_openings(pgn_file)
+        # After 1.e4 e5
+        assert "pppp1ppp" in fens[0]  # Black pawn moved from e7
+        # After 1.d4 d5 2.c4 - both c and d pawns advanced
+        assert "2PP4" in fens[1]  # White pawns on c4 and d4
+
+    def test_load_pgn_missing_file(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            load_pgn_openings(tmp_path / "nonexistent.pgn")
+
+    def test_load_pgn_empty_file(self, tmp_path: Path) -> None:
+        pgn_path = tmp_path / "empty.pgn"
+        pgn_path.write_text("")
+        fens = load_pgn_openings(pgn_path)
+        assert fens == []
+
+
+class TestLoadOpenings:
+    """Tests for the unified load_openings dispatcher."""
+
+    def test_dispatches_to_epd(self, tmp_path: Path) -> None:
+        content = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1 ; e4\n"
+        epd_path = tmp_path / "book.epd"
+        epd_path.write_text(content)
+        fens = load_openings(epd_path)
+        assert len(fens) == 1
+
+    def test_dispatches_to_pgn(self, tmp_path: Path) -> None:
+        content = '[Event "T"]\n[Result "*"]\n\n1. e4 *\n'
+        pgn_path = tmp_path / "book.pgn"
+        pgn_path.write_text(content)
+        fens = load_openings(pgn_path)
+        assert len(fens) == 1
+
+    def test_unsupported_extension(self, tmp_path: Path) -> None:
+        txt_path = tmp_path / "book.txt"
+        txt_path.write_text("some content")
+        with pytest.raises(ValueError, match="Unsupported opening book format"):
+            load_openings(txt_path)

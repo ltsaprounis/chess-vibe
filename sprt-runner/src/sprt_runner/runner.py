@@ -34,7 +34,7 @@ from shared.uci_client import UCIClient
 
 from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig, play_game
-from sprt_runner.openings import OpeningPair, load_epd_openings, make_opening_pairs
+from sprt_runner.openings import OpeningPair, load_openings, make_opening_pairs
 from sprt_runner.sprt import SPRTDecision, sprt_test
 from sprt_runner.worktree import parse_engine_spec, resolve_engine_path
 
@@ -278,7 +278,7 @@ async def run_sprt(config: RunConfig) -> None:
     opening_pairs: list[OpeningPair] = []
     if config.book_path is not None:
         try:
-            fens = load_epd_openings(config.book_path)
+            fens = load_openings(config.book_path)
             opening_pairs = make_opening_pairs(fens)
         except Exception as e:
             print(format_error_message(f"Failed to load opening book: {e}"), flush=True)
