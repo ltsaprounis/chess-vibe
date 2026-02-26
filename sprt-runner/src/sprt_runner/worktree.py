@@ -139,7 +139,8 @@ async def resolve_engine_path(
 
     For specs without a commit, reads ``engines.json`` from the current
     repo root. For specs with a commit, creates a git worktree at that
-    commit and reads the registry from there.
+    commit and reads the registry from there. If ``engines.json`` is
+    absent in the worktree, falls back to reading from the repo root.
 
     If the engine has a build command, it is executed before returning.
 
@@ -159,12 +160,26 @@ async def resolve_engine_path(
     else:
         effective_root = repo_root
 
-    # Load engine registry
+    # Load engine registry — fall back to repo root when absent in worktree
     registry_path = effective_root / "engines.json"
     try:
         entries = load_registry(registry_path)
-    except EngineRegistryError as e:
-        raise WorktreeError(f"Cannot read registry at '{registry_path}': {e}") from e
+    except EngineRegistryError:
+        if effective_root != repo_root:
+            logger.info(
+                "engines.json not found in worktree %s, falling back to %s",
+                effective_root,
+                repo_root,
+            )
+            fallback_path = repo_root / "engines.json"
+            try:
+                entries = load_registry(fallback_path)
+            except EngineRegistryError as e2:
+                raise WorktreeError(
+                    f"Cannot read registry at '{fallback_path}' (fallback): {e2}"
+                ) from e2
+        else:
+            raise WorktreeError(f"Cannot read registry at '{registry_path}'")
 
     # Find the engine entry
     entry = None

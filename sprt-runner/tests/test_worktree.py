@@ -176,3 +176,45 @@ class TestResolveEnginePath:
             assert run_cmd == "./engine"
             # Build should have been invoked
             mock_exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_worktree_fallback_to_repo_root(self, tmp_path: Path) -> None:
+        """When engines.json is missing in worktree, falls back to repo root."""
+        import json
+
+        registry = [
+            {
+                "id": "test-engine",
+                "name": "Test",
+                "dir": "engines/test-engine",
+                "build": None,
+                "run": "run_cmd",
+            }
+        ]
+        # engines.json only in repo root, NOT in worktree
+        registry_path = tmp_path / "engines.json"
+        registry_path.write_text(json.dumps(registry))
+
+        spec = EngineSpec(engine_id="test-engine", commit="abc123")
+
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate = AsyncMock(return_value=(b"", b""))
+
+        # Create worktree dir without engines.json
+        worktree_path = tmp_path / ".worktrees" / "abc123"
+        worktree_path.mkdir(parents=True, exist_ok=True)
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
+            run_cmd, engine_dir = await resolve_engine_path(spec, repo_root=tmp_path)
+            assert run_cmd == "run_cmd"
+            # Engine dir should be resolved from worktree root
+            assert engine_dir == worktree_path / "engines/test-engine"
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_without_commit(self, tmp_path: Path) -> None:
+        """Without a commit, missing engines.json should still raise."""
+        spec = EngineSpec(engine_id="test", commit=None)
+        with pytest.raises(WorktreeError, match="Cannot read registry"):
+            await resolve_engine_path(spec, repo_root=tmp_path)
