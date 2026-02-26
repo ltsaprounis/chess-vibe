@@ -1,5 +1,6 @@
-"""Shared library for chess-vibe: UCI client and time control models."""
+"""Shared library for chess-vibe: UCI client, time control models, and engine registry."""
 
+from shared.engine_registry import EngineEntry, EngineRegistryError, load_registry
 from shared.time_control import (
     DepthTimeControl,
     FixedTimeControl,
@@ -23,6 +24,8 @@ from shared.uci_client import (
 __all__ = [
     "BestMove",
     "DepthTimeControl",
+    "EngineEntry",
+    "EngineRegistryError",
     "FixedTimeControl",
     "IncrementTimeControl",
     "NodesTimeControl",
@@ -34,6 +37,7 @@ __all__ = [
     "UCIInfo",
     "UCIScore",
     "UCITimeoutError",
+    "load_registry",
     "parse_bestmove",
     "parse_info_line",
 ]
