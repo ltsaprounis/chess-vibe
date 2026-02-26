@@ -227,3 +227,65 @@ class TestPlayGame:
 
         assert outcome.result == GameResult.DRAW
         assert outcome.termination == TerminationReason.MAX_MOVES
+
+    @pytest.mark.asyncio
+    async def test_move_watchdog_timeout(self) -> None:
+        """Test that watchdog timeout triggers when engine takes too long."""
+        import asyncio
+
+        white_engine = MagicMock()
+        white_engine.start = AsyncMock()
+        white_engine.quit = AsyncMock()
+        white_engine.uci = AsyncMock(return_value=[])
+        white_engine.isready = AsyncMock()
+        white_engine.position = AsyncMock()
+        white_engine.stop = AsyncMock()
+        white_engine.is_running = True
+
+        # Engine.go() hangs forever
+        async def slow_go(_tc: object) -> tuple[BestMove, list[UCIInfo]]:
+            await asyncio.sleep(10)
+            return BestMove(move="e2e4"), []
+
+        white_engine.go = AsyncMock(side_effect=slow_go)
+
+        black_engine = _mock_engine(["e7e5"])
+
+        config = GameConfig(
+            time_control=DepthTimeControl(depth=5),
+            adjudication=AdjudicationConfig(win_consecutive_moves=0, draw_consecutive_moves=0),
+            move_overhead_ms=50,  # 50ms timeout - engine will definitely exceed this
+        )
+
+        outcome = await play_game(
+            white=white_engine,
+            black=black_engine,
+            config=config,
+        )
+
+        assert outcome.result == GameResult.BLACK_WIN
+        assert outcome.termination == TerminationReason.TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_move_watchdog_disabled(self) -> None:
+        """Test that game works with watchdog disabled."""
+        white_moves = ["e2e4", "d1h5", "f1c4", "h5f7"]
+        black_moves = ["e7e5", "b8c6", "g8f6"]
+
+        white_engine = _mock_engine(white_moves)
+        black_engine = _mock_engine(black_moves)
+
+        config = GameConfig(
+            time_control=DepthTimeControl(depth=5),
+            adjudication=AdjudicationConfig(win_consecutive_moves=0, draw_consecutive_moves=0),
+            move_overhead_ms=0,  # Disabled
+        )
+
+        outcome = await play_game(
+            white=white_engine,
+            black=black_engine,
+            config=config,
+        )
+
+        assert outcome.result == GameResult.WHITE_WIN
+        assert outcome.termination == TerminationReason.CHECKMATE

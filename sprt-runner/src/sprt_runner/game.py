@@ -1,13 +1,16 @@
 """Single game loop for SPRT testing.
 
 Plays a complete game between two UCI engine clients, alternating moves,
-enforcing time control, detecting termination conditions, delegating to
-adjudication, and recording all moves with per-move evaluations.
+enforcing time control via ``time.monotonic_ns()`` deadlines, detecting
+termination conditions, delegating to adjudication, and recording all
+moves with per-move evaluations.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -63,12 +66,17 @@ class GameConfig:
         adjudication: Adjudication thresholds.
         start_fen: Custom starting FEN, or None for standard start.
         max_moves: Maximum number of full moves before declaring a draw.
+        move_overhead_ms: Per-move watchdog timeout overhead in milliseconds.
+            The total per-move deadline is the time control limit plus this
+            overhead. Set to 0 to disable the watchdog. Uses
+            ``time.monotonic_ns()`` for deadline tracking.
     """
 
     time_control: TimeControl
     adjudication: AdjudicationConfig = field(default_factory=AdjudicationConfig)
     start_fen: str | None = None
     max_moves: int = 500
+    move_overhead_ms: int = 5000
 
 
 def _extract_score_cp(infos: list[UCIInfo]) -> int | None:
@@ -159,15 +167,41 @@ async def play_game(
         is_white = board.turn == chess.WHITE
         engine = white if is_white else black
 
-        # Set position
+        # Set position and search with deadline
         try:
             if config.start_fen:
                 await engine.position(fen=config.start_fen, moves=uci_moves if uci_moves else None)
             else:
                 await engine.position(moves=uci_moves if uci_moves else None)
 
-            # Search
-            bestmove, infos = await engine.go(config.time_control)
+            # Search with per-move watchdog deadline using time.monotonic_ns()
+            if config.move_overhead_ms > 0:
+                deadline_ns = time.monotonic_ns() + config.move_overhead_ms * 1_000_000
+                timeout_s = config.move_overhead_ms / 1000.0
+                try:
+                    bestmove, infos = await asyncio.wait_for(
+                        engine.go(config.time_control),
+                        timeout=timeout_s,
+                    )
+                except TimeoutError:
+                    elapsed_ns = time.monotonic_ns() - (
+                        deadline_ns - config.move_overhead_ms * 1_000_000
+                    )
+                    elapsed_ms = elapsed_ns / 1_000_000
+                    logger.warning(
+                        "Move watchdog timeout after %.0f ms (limit %d ms)",
+                        elapsed_ms,
+                        config.move_overhead_ms,
+                    )
+                    result = GameResult.BLACK_WIN if is_white else GameResult.WHITE_WIN
+                    return GameOutcome(
+                        result=result,
+                        termination=TerminationReason.TIMEOUT,
+                        moves=moves_played,
+                        start_fen=config.start_fen,
+                    )
+            else:
+                bestmove, infos = await engine.go(config.time_control)
         except UCITimeoutError:
             logger.warning("Engine timed out")
             result = GameResult.BLACK_WIN if is_white else GameResult.WHITE_WIN
