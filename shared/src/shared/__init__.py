@@ -1,6 +1,23 @@
-"""Shared library for chess-vibe: UCI client, time control models, and engine registry."""
+"""Shared library for chess-vibe: UCI client, time control models, engine registry, and storage."""
 
 from shared.engine_registry import EngineEntry, EngineRegistryError, load_registry
+from shared.storage import (
+    Engine,
+    FileGameRepository,
+    FileSPRTTestRepository,
+    Game,
+    GameFilter,
+    GameRepository,
+    GameResult,
+    Move,
+    OpeningBook,
+    SPRTOutcome,
+    SPRTStatus,
+    SPRTTest,
+    SPRTTestFilter,
+    SPRTTestRepository,
+    export_game_to_pgn,
+)
 from shared.time_control import (
     DepthTimeControl,
     FixedTimeControl,
@@ -24,11 +41,25 @@ from shared.uci_client import (
 __all__ = [
     "BestMove",
     "DepthTimeControl",
+    "Engine",
     "EngineEntry",
     "EngineRegistryError",
+    "FileGameRepository",
+    "FileSPRTTestRepository",
     "FixedTimeControl",
+    "Game",
+    "GameFilter",
+    "GameRepository",
+    "GameResult",
     "IncrementTimeControl",
+    "Move",
     "NodesTimeControl",
+    "OpeningBook",
+    "SPRTOutcome",
+    "SPRTStatus",
+    "SPRTTest",
+    "SPRTTestFilter",
+    "SPRTTestRepository",
     "TimeControl",
     "TimeControlType",
     "UCIClient",
@@ -37,6 +68,7 @@ __all__ = [
     "UCIInfo",
     "UCIScore",
     "UCITimeoutError",
+    "export_game_to_pgn",
     "load_registry",
     "parse_bestmove",
     "parse_info_line",
