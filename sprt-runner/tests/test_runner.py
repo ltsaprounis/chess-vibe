@@ -12,14 +12,14 @@ from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig
 from sprt_runner.runner import (
     RunConfig,
-    _worker_entry,
-    _WorkerResult,
-    _WorkerTask,
+    WorkerResult,
+    WorkerTask,
     format_complete_message,
     format_error_message,
     format_game_result_message,
     format_progress_message,
     parse_time_control,
+    worker_entry,
 )
 
 
@@ -154,7 +154,7 @@ class TestWorkerResult:
     """Tests for the worker result dataclass."""
 
     def test_success_result(self) -> None:
-        result = _WorkerResult(
+        result = WorkerResult(
             game_id="game-1",
             result=GameResult.WHITE_WIN,
             termination="checkmate",
@@ -166,7 +166,7 @@ class TestWorkerResult:
         assert result.error is None
 
     def test_error_result(self) -> None:
-        result = _WorkerResult(
+        result = WorkerResult(
             game_id="game-2",
             result=None,
             termination=None,
@@ -186,7 +186,7 @@ class TestWorkerTask:
             time_control=DepthTimeControl(depth=5),
             adjudication=AdjudicationConfig(win_consecutive_moves=0, draw_consecutive_moves=0),
         )
-        task = _WorkerTask(
+        task = WorkerTask(
             game_id="game-1",
             white_cmd="echo white",
             black_cmd="echo black",
@@ -206,7 +206,7 @@ class TestWorkerEntry:
             time_control=DepthTimeControl(depth=1),
             adjudication=AdjudicationConfig(win_consecutive_moves=0, draw_consecutive_moves=0),
         )
-        task = _WorkerTask(
+        task = WorkerTask(
             game_id="test-game",
             white_cmd="nonexistent_engine",
             black_cmd="nonexistent_engine",
@@ -214,11 +214,11 @@ class TestWorkerEntry:
             swap_colors=False,
         )
 
-        result_queue: multiprocessing.Queue[_WorkerResult] = multiprocessing.Queue()
+        result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
 
         # Run worker in a subprocess
         worker = multiprocessing.Process(
-            target=_worker_entry,
+            target=worker_entry,
             args=(task, result_queue),
         )
         worker.start()

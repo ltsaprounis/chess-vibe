@@ -267,7 +267,7 @@ def _resolve_run_command(run_cmd: str, engine_dir: Path) -> str:
 
 
 @dataclass(frozen=True)
-class _WorkerTask:
+class WorkerTask:
     """A game task to be executed by a worker process.
 
     Attributes:
@@ -286,7 +286,7 @@ class _WorkerTask:
 
 
 @dataclass(frozen=True)
-class _WorkerResult:
+class WorkerResult:
     """Result from a worker process sent via multiprocessing.Queue.
 
     Attributes:
@@ -306,7 +306,7 @@ class _WorkerResult:
     error: str | None = None
 
 
-async def _play_single_game(task: _WorkerTask) -> _WorkerResult:
+async def _play_single_game(task: WorkerTask) -> WorkerResult:
     """Play a single game (async, runs inside a worker process).
 
     Args:
@@ -333,7 +333,7 @@ async def _play_single_game(task: _WorkerTask) -> _WorkerResult:
             config=task.game_config,
         )
 
-        return _WorkerResult(
+        return WorkerResult(
             game_id=task.game_id,
             result=outcome.result,
             termination=outcome.termination.value,
@@ -341,7 +341,7 @@ async def _play_single_game(task: _WorkerTask) -> _WorkerResult:
             swap_colors=task.swap_colors,
         )
     except Exception as e:
-        return _WorkerResult(
+        return WorkerResult(
             game_id=task.game_id,
             result=None,
             termination=None,
@@ -354,9 +354,9 @@ async def _play_single_game(task: _WorkerTask) -> _WorkerResult:
         await black_engine.quit()
 
 
-def _worker_entry(
-    task: _WorkerTask,
-    result_queue: multiprocessing.Queue[_WorkerResult],
+def worker_entry(
+    task: WorkerTask,
+    result_queue: multiprocessing.Queue[WorkerResult],
 ) -> None:
     """Entry point for a worker process.
 
@@ -412,7 +412,7 @@ async def run_sprt(config: RunConfig) -> None:
     pair_index = 0
 
     # Result queue for IPC from worker processes
-    result_queue: multiprocessing.Queue[_WorkerResult] = multiprocessing.Queue()
+    result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
 
     active_workers: list[multiprocessing.Process] = []
 
@@ -446,7 +446,7 @@ async def run_sprt(config: RunConfig) -> None:
                 start_fen=start_fen,
             )
 
-            task = _WorkerTask(
+            task = WorkerTask(
                 game_id=game_id,
                 white_cmd=white_cmd,
                 black_cmd=black_cmd,
@@ -455,7 +455,7 @@ async def run_sprt(config: RunConfig) -> None:
             )
 
             worker = multiprocessing.Process(
-                target=_worker_entry,
+                target=worker_entry,
                 args=(task, result_queue),
             )
             worker.start()
