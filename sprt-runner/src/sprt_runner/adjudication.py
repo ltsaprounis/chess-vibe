@@ -204,6 +204,8 @@ def _check_syzygy(
     if piece_count > 7:
         return None
 
+    # Note: opening tablebase per probe is acceptable since this only
+    # runs when pieces ≤ 7 (late endgame). python-chess caches internally.
     try:
         with chess.syzygy.open_tablebase(str(syzygy_path)) as tablebase:
             wdl = tablebase.probe_wdl(board)

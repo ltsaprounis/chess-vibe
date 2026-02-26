@@ -461,11 +461,28 @@ async def run_sprt(config: RunConfig) -> None:
             worker.start()
             active_workers.append(worker)
 
-        # Wait for a result from any worker
-        worker_result = result_queue.get()
+        # Wait for a result from any worker (with timeout for crash safety)
+        try:
+            worker_result = result_queue.get(timeout=300)
+        except Exception:
+            # Queue timeout — check for dead workers
+            dead = [w for w in active_workers if not w.is_alive()]
+            for w in dead:
+                w.join(timeout=1)
+            active_workers = [w for w in active_workers if w.is_alive()]
+            if not active_workers:
+                print(format_error_message("All workers died unexpectedly"), flush=True)
+                break
+            continue
 
-        # Clean up finished workers
-        active_workers = [w for w in active_workers if w.is_alive()]
+        # Clean up finished workers (join to free resources)
+        still_alive: list[multiprocessing.Process] = []
+        for w in active_workers:
+            if w.is_alive():
+                still_alive.append(w)
+            else:
+                w.join(timeout=1)
+        active_workers = still_alive
 
         # Handle result
         if worker_result.error is not None:

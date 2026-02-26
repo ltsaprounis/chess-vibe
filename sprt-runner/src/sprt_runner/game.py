@@ -176,7 +176,7 @@ async def play_game(
 
             # Search with per-move watchdog deadline using time.monotonic_ns()
             if config.move_overhead_ms > 0:
-                deadline_ns = time.monotonic_ns() + config.move_overhead_ms * 1_000_000
+                start_ns = time.monotonic_ns()
                 timeout_s = config.move_overhead_ms / 1000.0
                 try:
                     bestmove, infos = await asyncio.wait_for(
@@ -184,10 +184,7 @@ async def play_game(
                         timeout=timeout_s,
                     )
                 except TimeoutError:
-                    elapsed_ns = time.monotonic_ns() - (
-                        deadline_ns - config.move_overhead_ms * 1_000_000
-                    )
-                    elapsed_ms = elapsed_ns / 1_000_000
+                    elapsed_ms = (time.monotonic_ns() - start_ns) / 1_000_000
                     logger.warning(
                         "Move watchdog timeout after %.0f ms (limit %d ms)",
                         elapsed_ms,

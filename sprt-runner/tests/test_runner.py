@@ -224,6 +224,10 @@ class TestWorkerEntry:
         worker.start()
         worker.join(timeout=10)
 
+        # Worker should have completed
+        assert not worker.is_alive()
+        assert worker.exitcode == 0
+
         # Worker should have put a result on the queue
         assert not result_queue.empty()
         result = result_queue.get(timeout=1)
