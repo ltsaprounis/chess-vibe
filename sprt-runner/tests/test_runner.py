@@ -64,7 +64,6 @@ class TestRunConfig:
         )
         assert config.base == "random-engine"
         assert config.test == "test-engine"
-        assert config.concurrency == 1
         assert config.alpha == 0.05
         assert config.beta == 0.05
 

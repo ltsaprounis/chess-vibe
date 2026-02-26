@@ -17,7 +17,8 @@ class OpeningPair:
 
     Attributes:
         fen: FEN string of the starting position.
-        swap_colors: If True, the test engine plays black (and base plays white).
+        swap_colors: If True, the test engine plays white (and base plays black).
+            Default is False, where the base engine plays white.
     """
 
     fen: str

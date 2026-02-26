@@ -59,7 +59,6 @@ class RunConfig:
         alpha: Type-I error rate.
         beta: Type-II error rate.
         book_path: Path to the opening book file (EPD).
-        concurrency: Number of concurrent games.
         adjudication: Adjudication configuration.
         repo_root: Root of the git repository.
     """
@@ -72,7 +71,6 @@ class RunConfig:
     alpha: float = 0.05
     beta: float = 0.05
     book_path: Path | None = None
-    concurrency: int = 1
     adjudication: AdjudicationConfig = field(default_factory=AdjudicationConfig)
     repo_root: Path = field(default_factory=lambda: Path.cwd())
 
@@ -445,7 +443,6 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--elo0", type=float, default=0.0, help="H0 Elo bound")
     run_parser.add_argument("--elo1", type=float, default=5.0, help="H1 Elo bound")
     run_parser.add_argument("--book", type=str, default=None, help="Path to opening book (EPD)")
-    run_parser.add_argument("--concurrency", type=int, default=1, help="Number of concurrent games")
     run_parser.add_argument("--alpha", type=float, default=0.05, help="Type-I error rate")
     run_parser.add_argument("--beta", type=float, default=0.05, help="Type-II error rate")
     run_parser.add_argument(
@@ -494,7 +491,6 @@ def main() -> None:
         alpha=args.alpha,
         beta=args.beta,
         book_path=Path(args.book) if args.book else None,
-        concurrency=args.concurrency,
         adjudication=adjudication,
     )
 
