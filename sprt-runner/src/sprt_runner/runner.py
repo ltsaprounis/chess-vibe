@@ -232,6 +232,30 @@ def format_error_message(message: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_run_command(run_cmd: str, engine_dir: Path) -> str:
+    """Resolve an engine run command to a full executable path.
+
+    The run command from ``engines.json`` is relative to the engine
+    directory. This function resolves the first token (the executable)
+    to a full path while preserving any arguments.
+
+    Args:
+        run_cmd: Run command from the engine registry.
+        engine_dir: Directory where the engine is located.
+
+    Returns:
+        The resolved command string with full path to executable.
+    """
+    parts = run_cmd.split()
+    if not parts:
+        return run_cmd
+
+    # Resolve the executable relative to engine_dir
+    executable = engine_dir / parts[0]
+    resolved_parts = [str(executable), *parts[1:]]
+    return " ".join(resolved_parts)
+
+
 async def run_sprt(config: RunConfig) -> None:
     """Run a complete SPRT test.
 
@@ -287,9 +311,14 @@ async def run_sprt(config: RunConfig) -> None:
             white_run, white_dir = base_run, base_dir
             black_run, black_dir = test_run, test_dir
 
-        # Create engine clients
-        white_engine = UCIClient(str(white_dir / white_run))
-        black_engine = UCIClient(str(black_dir / black_run))
+        # Create engine clients using the run command from the engine directory
+        # The run command is relative to the engine dir (e.g. ".venv/bin/python -m engine")
+        # We construct the full command by splitting and resolving the first token
+        white_cmd = _resolve_run_command(white_run, white_dir)
+        black_cmd = _resolve_run_command(black_run, black_dir)
+
+        white_engine = UCIClient(white_cmd)
+        black_engine = UCIClient(black_cmd)
 
         game_id = str(uuid.uuid4())
         game_config = GameConfig(

@@ -84,40 +84,39 @@ def _extract_score_cp(infos: list[UCIInfo]) -> int | None:
     return None
 
 
-def _extract_move_data(infos: list[UCIInfo]) -> dict[str, int | None | list[str]]:
-    """Extract evaluation data from info lines for move recording."""
+@dataclass
+class _MoveData:
+    """Extracted evaluation data from UCI info lines."""
+
     depth: int | None = None
     seldepth: int | None = None
     score_cp: int | None = None
     score_mate: int | None = None
-    pv: list[str] = []
+    pv: list[str] = field(default_factory=list[str])
     nodes: int | None = None
     time_ms: int | None = None
 
-    for info in reversed(infos):
-        if info.depth is not None and depth is None:
-            depth = info.depth
-        if info.seldepth is not None and seldepth is None:
-            seldepth = info.seldepth
-        if info.score is not None and score_cp is None and score_mate is None:
-            score_cp = info.score.cp
-            score_mate = info.score.mate
-        if info.pv and not pv:
-            pv = info.pv
-        if info.nodes is not None and nodes is None:
-            nodes = info.nodes
-        if info.time_ms is not None and time_ms is None:
-            time_ms = info.time_ms
 
-    return {
-        "depth": depth,
-        "seldepth": seldepth,
-        "score_cp": score_cp,
-        "score_mate": score_mate,
-        "pv": pv,
-        "nodes": nodes,
-        "time_ms": time_ms,
-    }
+def _extract_move_data(infos: list[UCIInfo]) -> _MoveData:
+    """Extract evaluation data from info lines for move recording."""
+    data = _MoveData()
+
+    for info in reversed(infos):
+        if info.depth is not None and data.depth is None:
+            data.depth = info.depth
+        if info.seldepth is not None and data.seldepth is None:
+            data.seldepth = info.seldepth
+        if info.score is not None and data.score_cp is None and data.score_mate is None:
+            data.score_cp = info.score.cp
+            data.score_mate = info.score.mate
+        if info.pv and not data.pv:
+            data.pv = info.pv
+        if info.nodes is not None and data.nodes is None:
+            data.nodes = info.nodes
+        if info.time_ms is not None and data.time_ms is None:
+            data.time_ms = info.time_ms
+
+    return data
 
 
 async def play_game(
@@ -146,7 +145,7 @@ async def play_game(
 
     while True:
         # Check move limit
-        full_moves = (len(moves_played) + 1) // 2 + 1
+        full_moves = (len(moves_played) // 2) + 1
         if full_moves > config.max_moves:
             logger.info("Max moves (%d) reached, declaring draw", config.max_moves)
             return GameOutcome(
@@ -221,26 +220,25 @@ async def play_game(
             uci=bestmove.move,
             san=san,
             fen_after=fen_after,
-            score_cp=move_data["score_cp"],  # type: ignore[arg-type]
-            score_mate=move_data["score_mate"],  # type: ignore[arg-type]
-            depth=move_data["depth"],  # type: ignore[arg-type]
-            seldepth=move_data["seldepth"],  # type: ignore[arg-type]
-            pv=move_data["pv"],  # type: ignore[arg-type]
-            nodes=move_data["nodes"],  # type: ignore[arg-type]
-            time_ms=move_data["time_ms"],  # type: ignore[arg-type]
+            score_cp=move_data.score_cp,
+            score_mate=move_data.score_mate,
+            depth=move_data.depth,
+            seldepth=move_data.seldepth,
+            pv=move_data.pv,
+            nodes=move_data.nodes,
+            time_ms=move_data.time_ms,
         )
         moves_played.append(move)
         uci_moves.append(bestmove.move)
 
         # Track scores for adjudication
+        # Scores are from each engine's perspective (positive = engine thinks it's ahead)
         score_cp = _extract_score_cp(infos)
         if score_cp is not None:
             if is_white:
                 white_scores.append(score_cp)
             else:
-                # Black's score from engine perspective (positive = black ahead)
-                # Negate to convert to white's perspective for adjudication
-                black_scores.append(-score_cp)
+                black_scores.append(score_cp)
 
         # Check game-ending conditions
         if board.is_checkmate():

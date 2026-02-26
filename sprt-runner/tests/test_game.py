@@ -93,14 +93,6 @@ class TestPlayGame:
         assert len(outcome.moves) == 7
 
     @pytest.mark.asyncio
-    async def test_stalemate_detection(self) -> None:
-        """Test a game that ends in stalemate."""
-        # This test verifies the stalemate code path exists.
-        # Stalemate is hard to construct with mock engines, so we
-        # verify implicitly via the chess library integration.
-        pass  # Stalemate detection is handled by python-chess board.is_stalemate()
-
-    @pytest.mark.asyncio
     async def test_draw_adjudication(self) -> None:
         """Test a game that ends via draw adjudication."""
         # Play enough moves with near-zero evals
