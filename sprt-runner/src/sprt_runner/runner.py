@@ -4,6 +4,10 @@ Provides the CLI interface for running SPRT tests between engine pairs.
 Outputs JSON-lines to stdout for consumption by the backend. Errors go
 to stderr only.
 
+Uses ``multiprocessing`` for game-level parallelism with ``asyncio``
+inside each worker for UCI I/O. Workers report results via
+``multiprocessing.Queue``; the coordinator aggregates single-threaded.
+
 Message types:
     - ``game_result``: Result of a single game.
     - ``progress``: Running SPRT statistics.
@@ -17,6 +21,7 @@ import argparse
 import asyncio
 import json
 import logging
+import multiprocessing
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -58,7 +63,8 @@ class RunConfig:
         elo1: Alternative hypothesis Elo difference.
         alpha: Type-I error rate.
         beta: Type-II error rate.
-        book_path: Path to the opening book file (EPD).
+        book_path: Path to the opening book file (EPD or PGN).
+        concurrency: Number of concurrent game worker processes.
         adjudication: Adjudication configuration.
         repo_root: Root of the git repository.
     """
@@ -71,6 +77,7 @@ class RunConfig:
     alpha: float = 0.05
     beta: float = 0.05
     book_path: Path | None = None
+    concurrency: int = 1
     adjudication: AdjudicationConfig = field(default_factory=AdjudicationConfig)
     repo_root: Path = field(default_factory=lambda: Path.cwd())
 
@@ -254,11 +261,124 @@ def _resolve_run_command(run_cmd: str, engine_dir: Path) -> str:
     return " ".join(resolved_parts)
 
 
+# ---------------------------------------------------------------------------
+# Worker process for multiprocessing concurrency
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _WorkerTask:
+    """A game task to be executed by a worker process.
+
+    Attributes:
+        game_id: Unique game identifier.
+        white_cmd: Resolved command for the white engine.
+        black_cmd: Resolved command for the black engine.
+        game_config: Configuration for this game.
+        swap_colors: Whether colours are swapped (test plays white).
+    """
+
+    game_id: str
+    white_cmd: str
+    black_cmd: str
+    game_config: GameConfig
+    swap_colors: bool
+
+
+@dataclass(frozen=True)
+class _WorkerResult:
+    """Result from a worker process sent via multiprocessing.Queue.
+
+    Attributes:
+        game_id: Unique game identifier.
+        result: The game result.
+        termination: How the game ended.
+        move_count: Number of moves played.
+        swap_colors: Whether colours were swapped.
+        error: Error message if the game failed, or None.
+    """
+
+    game_id: str
+    result: GameResult | None
+    termination: str | None
+    move_count: int
+    swap_colors: bool
+    error: str | None = None
+
+
+async def _play_single_game(task: _WorkerTask) -> _WorkerResult:
+    """Play a single game (async, runs inside a worker process).
+
+    Args:
+        task: The game task to execute.
+
+    Returns:
+        WorkerResult with the game outcome.
+    """
+    white_engine = UCIClient(task.white_cmd)
+    black_engine = UCIClient(task.black_cmd)
+
+    try:
+        await white_engine.start()
+        await white_engine.uci()
+        await white_engine.isready()
+
+        await black_engine.start()
+        await black_engine.uci()
+        await black_engine.isready()
+
+        outcome = await play_game(
+            white=white_engine,
+            black=black_engine,
+            config=task.game_config,
+        )
+
+        return _WorkerResult(
+            game_id=task.game_id,
+            result=outcome.result,
+            termination=outcome.termination.value,
+            move_count=len(outcome.moves),
+            swap_colors=task.swap_colors,
+        )
+    except Exception as e:
+        return _WorkerResult(
+            game_id=task.game_id,
+            result=None,
+            termination=None,
+            move_count=0,
+            swap_colors=task.swap_colors,
+            error=str(e),
+        )
+    finally:
+        await white_engine.quit()
+        await black_engine.quit()
+
+
+def _worker_entry(
+    task: _WorkerTask,
+    result_queue: multiprocessing.Queue[_WorkerResult],
+) -> None:
+    """Entry point for a worker process.
+
+    Runs an asyncio event loop to play a single game and puts the
+    result onto the multiprocessing queue.
+
+    Args:
+        task: The game task to execute.
+        result_queue: Queue to send results back to the coordinator.
+    """
+    worker_result = asyncio.run(_play_single_game(task))
+    result_queue.put(worker_result)
+
+
 async def run_sprt(config: RunConfig) -> None:
     """Run a complete SPRT test.
 
-    Resolves engine paths, loads opening book, plays games in pairs,
-    and streams JSON-lines progress to stdout.
+    Resolves engine paths, loads opening book, plays games using
+    ``multiprocessing`` for game-level parallelism (with ``asyncio``
+    inside each worker for UCI I/O), and streams JSON-lines progress
+    to stdout. Workers report via ``multiprocessing.Queue``; the
+    coordinator aggregates single-threaded.
 
     Args:
         config: Run configuration.
@@ -291,78 +411,91 @@ async def run_sprt(config: RunConfig) -> None:
     games_played = 0
     pair_index = 0
 
+    # Result queue for IPC from worker processes
+    result_queue: multiprocessing.Queue[_WorkerResult] = multiprocessing.Queue()
+
+    active_workers: list[multiprocessing.Process] = []
+
     while True:
-        # Select opening
-        start_fen: str | None = None
-        swap_colors = False
-        if opening_pairs:
-            pair = opening_pairs[pair_index % len(opening_pairs)]
-            start_fen = pair.fen
-            swap_colors = pair.swap_colors
-            pair_index += 1
+        # Launch workers up to concurrency limit
+        while len(active_workers) < config.concurrency:
+            # Select opening
+            start_fen: str | None = None
+            swap_colors = False
+            if opening_pairs:
+                pair = opening_pairs[pair_index % len(opening_pairs)]
+                start_fen = pair.fen
+                swap_colors = pair.swap_colors
+                pair_index += 1
 
-        # Determine colour assignment
-        if swap_colors:
-            white_run, white_dir = test_run, test_dir
-            black_run, black_dir = base_run, base_dir
-        else:
-            white_run, white_dir = base_run, base_dir
-            black_run, black_dir = test_run, test_dir
+            # Determine colour assignment
+            if swap_colors:
+                white_run, white_dir = test_run, test_dir
+                black_run, black_dir = base_run, base_dir
+            else:
+                white_run, white_dir = base_run, base_dir
+                black_run, black_dir = test_run, test_dir
 
-        # Create engine clients using the run command from the engine directory
-        # The run command is relative to the engine dir (e.g. ".venv/bin/python -m engine")
-        # We construct the full command by splitting and resolving the first token
-        white_cmd = _resolve_run_command(white_run, white_dir)
-        black_cmd = _resolve_run_command(black_run, black_dir)
+            white_cmd = _resolve_run_command(white_run, white_dir)
+            black_cmd = _resolve_run_command(black_run, black_dir)
 
-        white_engine = UCIClient(white_cmd)
-        black_engine = UCIClient(black_cmd)
-
-        game_id = str(uuid.uuid4())
-        game_config = GameConfig(
-            time_control=config.time_control,
-            adjudication=config.adjudication,
-            start_fen=start_fen,
-        )
-
-        try:
-            await white_engine.start()
-            await white_engine.uci()
-            await white_engine.isready()
-
-            await black_engine.start()
-            await black_engine.uci()
-            await black_engine.isready()
-
-            outcome = await play_game(
-                white=white_engine,
-                black=black_engine,
-                config=game_config,
+            game_id = str(uuid.uuid4())
+            game_config = GameConfig(
+                time_control=config.time_control,
+                adjudication=config.adjudication,
+                start_fen=start_fen,
             )
-        except Exception as e:
-            print(format_error_message(f"Game {game_id} failed: {e}"), flush=True)
-            logger.exception("Game failed")
+
+            task = _WorkerTask(
+                game_id=game_id,
+                white_cmd=white_cmd,
+                black_cmd=black_cmd,
+                game_config=game_config,
+                swap_colors=swap_colors,
+            )
+
+            worker = multiprocessing.Process(
+                target=_worker_entry,
+                args=(task, result_queue),
+            )
+            worker.start()
+            active_workers.append(worker)
+
+        # Wait for a result from any worker
+        worker_result = result_queue.get()
+
+        # Clean up finished workers
+        active_workers = [w for w in active_workers if w.is_alive()]
+
+        # Handle result
+        if worker_result.error is not None:
+            print(
+                format_error_message(
+                    f"Game {worker_result.game_id} failed: {worker_result.error}"
+                ),
+                flush=True,
+            )
             continue
-        finally:
-            await white_engine.quit()
-            await black_engine.quit()
+
+        if worker_result.result is None:
+            continue
 
         games_played += 1
 
         # Determine result from test engine's perspective
-        if swap_colors:
+        if worker_result.swap_colors:
             # Test was white
-            if outcome.result == GameResult.WHITE_WIN:
+            if worker_result.result == GameResult.WHITE_WIN:
                 wins += 1
-            elif outcome.result == GameResult.BLACK_WIN:
+            elif worker_result.result == GameResult.BLACK_WIN:
                 losses += 1
             else:
                 draws += 1
         else:
             # Test was black
-            if outcome.result == GameResult.BLACK_WIN:
+            if worker_result.result == GameResult.BLACK_WIN:
                 wins += 1
-            elif outcome.result == GameResult.WHITE_WIN:
+            elif worker_result.result == GameResult.WHITE_WIN:
                 losses += 1
             else:
                 draws += 1
@@ -370,10 +503,10 @@ async def run_sprt(config: RunConfig) -> None:
         # Output game result
         print(
             format_game_result_message(
-                game_id=game_id,
-                result=outcome.result,
-                termination=outcome.termination.value,
-                move_count=len(outcome.moves),
+                game_id=worker_result.game_id,
+                result=worker_result.result,
+                termination=worker_result.termination or "unknown",
+                move_count=worker_result.move_count,
             ),
             flush=True,
         )
@@ -414,6 +547,10 @@ async def run_sprt(config: RunConfig) -> None:
                 ),
                 flush=True,
             )
+            # Terminate remaining workers
+            for w in active_workers:
+                w.terminate()
+                w.join(timeout=5)
             break
 
 
@@ -442,7 +579,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--elo0", type=float, default=0.0, help="H0 Elo bound")
     run_parser.add_argument("--elo1", type=float, default=5.0, help="H1 Elo bound")
-    run_parser.add_argument("--book", type=str, default=None, help="Path to opening book (EPD)")
+    run_parser.add_argument("--book", type=str, default=None, help="Path to opening book (EPD/PGN)")
+    run_parser.add_argument(
+        "--concurrency", type=int, default=1, help="Number of concurrent game worker processes"
+    )
     run_parser.add_argument("--alpha", type=float, default=0.05, help="Type-I error rate")
     run_parser.add_argument("--beta", type=float, default=0.05, help="Type-II error rate")
     run_parser.add_argument(
@@ -491,6 +631,7 @@ def main() -> None:
         alpha=args.alpha,
         beta=args.beta,
         book_path=Path(args.book) if args.book else None,
+        concurrency=args.concurrency,
         adjudication=adjudication,
     )
 
