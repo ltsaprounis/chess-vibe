@@ -15,11 +15,11 @@ Validates an existing pull request — code review, CI status, and frontend E2E 
 
 ## Constraints
 
-- **Read-only agent.** Do not create commits, push branches, or open pull requests under any circumstances.
+- **Non-destructive agent.** Do not create commits, push branches, or open pull requests under any circumstances. You may fetch and read branches locally using git worktrees, but never modify the repository history.
 
 ## Instructions
 
-You are a read-only validation agent for the chess-vibe monorepo. Given a PR number, perform a complete review using the GitHub MCP server for PR metadata, diffs, CI status, and review submission.
+You are a validation agent for the chess-vibe monorepo. Given a PR number, you check out the PR branch in a **git worktree** so you can run tests, linting, and type-checking locally in a clean, isolated environment. You also use the GitHub MCP server for PR metadata, diffs, CI status, and review submission.
 
 ### Architecture Reference
 
@@ -50,13 +50,34 @@ For each tagged issue:
 
 1. **Read PR + linked issues** — Fetch PR description, changed files, linked issues, and CI status from `ltsaprounis/chess-vibe`.
 2. **Identify affected components** — Determine impacted areas (`shared/`, `sprt-runner/`, `backend/`, `frontend/`, `scripts/`).
-3. **Validate CI** — Confirm GitHub Actions status for affected components:
-   - All tests pass for affected components.
-   - Linting passes (Ruff for Python, ESLint for TypeScript).
-   - Formatting passes (Ruff format for Python, Prettier for TypeScript).
-   - Type checking passes (Pyright strict for Python, `tsc --noEmit` for TypeScript).
-   - If CI has not run yet, note it in the review.
-4. **Review requirements + code** — Validate issue requirements and review diff/changed files for:
+3. **Set up a git worktree for the PR branch** — Check out the PR branch into an isolated worktree so you can inspect and run the code without affecting the current working tree:
+   ```bash
+   # Fetch the PR branch
+   git fetch origin <branch-name>
+   # Remove any stale worktree from a previous run
+   git worktree remove /tmp/chess-vibe-review-<pr-number> --force 2>/dev/null
+   # Create the worktree
+   git worktree add /tmp/chess-vibe-review-<pr-number> origin/<branch-name>
+   cd /tmp/chess-vibe-review-<pr-number>
+   ```
+   **Clean environment setup (mandatory):** For every affected Python component (`shared/`, `sprt-runner/`, `backend/`), create a fresh virtual environment and install dependencies before running any checks:
+   ```bash
+   cd <component-dir>   # e.g. shared/, backend/, sprt-runner/
+   uv venv
+   uv sync
+   ```
+   For the frontend, install dependencies:
+   ```bash
+   cd frontend && npm ci
+   ```
+   This ensures validation runs against the PR code in isolation, not against whatever is in your current checkout.
+4. **Run local validation** — Inside the worktree, run the full validation suite for each affected component:
+   - **Tests:** `uv run pytest` (Python) / `npm run test:ci` (frontend)
+   - **Linting:** `ruff check .` (Python) / `npx eslint src/` (frontend)
+   - **Formatting:** `ruff format . --check` (Python) / `npx prettier --check src/` (frontend)
+   - **Type checking:** `uv run pyright` (Python) / `npx tsc --noEmit` (frontend)
+   - Compare these local results with the GitHub Actions CI status. If CI has not run yet, your local results serve as the primary validation.
+5. **Review requirements + code** — Validate issue requirements and review diff/changed files for:
    - Adherence to coding conventions (see `.github/copilot-instructions.md`).
    - Test coverage — every new public function/route/component must have tests (TDD).
    - No files modified under `engines/my-engine/`.
@@ -65,7 +86,7 @@ For each tagged issue:
    - Proper error handling — no silently swallowed exceptions.
    - No commented-out code.
    - Conventional commit messages.
-5. **Frontend E2E validation** (if frontend is affected, including indirect impact from backend/API/protocol changes):
+6. **Frontend E2E validation** (if frontend is affected, including indirect impact from backend/API/protocol changes):
    - Use the **Playwright MCP server** to validate the deployed preview or a GitHub Codespace.
    - Treat the frontend as affected when PR changes alter UI-facing contracts, for example:
      - REST response/request schema or validation behavior consumed by the frontend
@@ -74,10 +95,50 @@ For each tagged issue:
    - Navigate to key pages (`/play`, `/sprt`, `/games`).
    - Interact with components (chessboard, engine selector, SPRT dashboard).
    - Verify: pages render without errors, WebSocket connections establish, UI elements are interactive, forms submit correctly.
+   - **Capture a screenshot** via `browser_take_screenshot` after each key assertion as evidence for the validation report.
    - If no preview/Codespace URL is available, treat E2E as **non-blocking**: do not fail solely for missing environment. Add explicit PR review comments listing what could not be validated and why.
-6. **Report + submit review** — Submit a concise review summarizing requirement traceability, CI, boundary checks, code findings, E2E outcomes, and any non-blocking gaps:
-   - **Approve** if CI passes and code quality is good.
-   - **Request changes** if any blocking issue exists — include specific, actionable line comments.
+7. **Clean up worktree** — After validation is complete, remove the worktree:
+   ```bash
+   git worktree remove /tmp/chess-vibe-review-<pr-number> --force
+   ```
+8. **Submit review** — Submit a GitHub review with a **concise summary** (pass/fail counts, key findings) and actionable **line comments** on specific issues. Do not put the full report table in the review body.
+   - **Approve** if all criteria pass and code quality is good.
+   - **Request changes** if any blocking issue exists.
+9. **Post full validation report as a PR comment** — Post the complete structured report as a **comment on the PR** using the GitHub MCP server. This is where the detailed table lives, ensuring all reviewers can see it in the PR timeline.
+   - If a previous validation comment from this agent already exists on the PR, **update it** instead of creating a duplicate.
+
+   Use this template:
+
+   ```markdown
+   ## Validation Report — PR #<number>
+
+   ### Issue: <issue title> (#<issue number>)
+
+   | # | Criterion / Check | Strategy | Result | Notes |
+   |---|-------------------|----------|--------|-------|
+   | 1 | <requirement text> | 🧪 Local CI | ✅ PASS | All tests green |
+   | 2 | <requirement text> | 🌐 Browser | ❌ FAIL | Screenshot: <ref> |
+   | 3 | <code quality check> | 📝 Code review | ✅ PASS | Types, lint OK |
+   | 4 | <requirement text> | 🌐 Browser | ⏭️ BLOCKED | No preview URL |
+
+   ### Summary
+
+   - ✅ **Passed:** X
+   - ❌ **Failed:** Y
+   - ⏭️ **Blocked:** Z (prerequisites not met)
+   ```
+
+   **Final conclusion — use exactly one of:**
+   - ✅ **All checks and acceptance criteria for this PR are verified.**
+   - ❌ **Some checks or acceptance criteria failed validation. See details above.**
+
+### Failure Handling
+
+This rule applies globally to **all** validation steps (local CI, code review, E2E, etc.):
+
+- When a step or criterion fails, record the failing assertion, evidence (screenshot, terminal output), and context (URL, command, component).
+- **Continue** with all remaining criteria and steps — do not abort the entire run on the first failure.
+- Collect all results before producing the final report.
 
 ### Validation Checklist
 
