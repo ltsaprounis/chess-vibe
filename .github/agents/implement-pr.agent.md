@@ -51,6 +51,15 @@ Reject implementation approaches that violate core architecture invariants:
    - **Cross-process protocol changes**: Whether REST/WS/JSON-lines/subprocess contracts changed (and how)
 7. **Let CI validate** — The GitHub Actions CI pipeline runs tests, linting, type checking, and formatting on every push. Monitor the CI status; if checks fail, read the logs, fix the issues, and push corrections.
 
+### Handling Feedback on an Existing PR
+
+When you receive follow-up feedback (e.g. code review comments, change requests) on a PR you already opened:
+
+- **Never rewrite the PR title or description.** The original title, summary, `Closes #<number>` reference, and `## Architecture Impact` section must remain intact.
+- If the PR description needs an update based on the feedback (e.g. scope changed), **append or amend** the relevant section — do not replace the entire body.
+- Focus exclusively on the requested changes: fix the code, update tests, and push new commits to the existing branch.
+- Do not re-create the branch or open a new PR.
+
 ### Rules
 
 - Follow all coding conventions from `.github/copilot-instructions.md`.
