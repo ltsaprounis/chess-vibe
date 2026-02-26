@@ -8,12 +8,10 @@ adjudication, and recording all moves with per-move evaluations.
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
 from enum import Enum
 
 import chess
-
 from shared.storage.models import GameResult, Move
 from shared.time_control import TimeControl
 from shared.uci_client import UCIClient, UCIEngineError, UCIInfo, UCITimeoutError
@@ -139,10 +137,7 @@ async def play_game(
         GameOutcome with the result, termination reason, and moves.
     """
     # Initialize board
-    if config.start_fen:
-        board = chess.Board(config.start_fen)
-    else:
-        board = chess.Board()
+    board = chess.Board(config.start_fen) if config.start_fen else chess.Board()
 
     moves_played: list[Move] = []
     uci_moves: list[str] = []

@@ -140,7 +140,7 @@ class TestResolveEnginePath:
 
         with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = mock_process
-            run_cmd, engine_dir = await resolve_engine_path(spec, repo_root=tmp_path)
+            run_cmd, _engine_dir = await resolve_engine_path(spec, repo_root=tmp_path)
             assert run_cmd == "run_cmd"
 
     @pytest.mark.asyncio
@@ -172,7 +172,7 @@ class TestResolveEnginePath:
 
         with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = mock_process
-            run_cmd, resolved_dir = await resolve_engine_path(spec, repo_root=tmp_path)
+            run_cmd, _resolved_dir = await resolve_engine_path(spec, repo_root=tmp_path)
             assert run_cmd == "./engine"
             # Build should have been invoked
             mock_exec.assert_called_once()

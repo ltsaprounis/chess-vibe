@@ -176,8 +176,7 @@ async def resolve_engine_path(
     if entry is None:
         available = [e.id for e in entries]
         raise WorktreeError(
-            f"Engine '{spec.engine_id}' not found in registry. "
-            f"Available engines: {available}"
+            f"Engine '{spec.engine_id}' not found in registry. Available engines: {available}"
         )
 
     engine_dir = effective_root / entry.dir

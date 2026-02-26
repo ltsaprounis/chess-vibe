@@ -7,7 +7,6 @@ import math
 import pytest
 from sprt_runner.sprt import (
     SPRTDecision,
-    SPRTResult,
     calculate_llr,
     elo_to_score,
     sprt_bounds,
@@ -123,9 +122,7 @@ class TestSPRTTest:
         assert result.lower_bound < result.upper_bound
 
     def test_custom_alpha_beta(self) -> None:
-        result = sprt_test(
-            wins=10, losses=5, draws=10, elo0=0.0, elo1=5.0, alpha=0.01, beta=0.01
-        )
+        result = sprt_test(wins=10, losses=5, draws=10, elo0=0.0, elo1=5.0, alpha=0.01, beta=0.01)
         # Stricter bounds = wider
         default = sprt_test(wins=10, losses=5, draws=10, elo0=0.0, elo1=5.0)
         assert result.upper_bound > default.upper_bound

@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
 from sprt_runner.adjudication import (
     AdjudicationConfig,
-    AdjudicationResult,
     AdjudicationType,
     check_adjudication,
 )
@@ -87,9 +85,7 @@ class TestDrawAdjudication:
 
     def test_draw_adjudication(self) -> None:
         """Both engines agree position is drawn for enough moves."""
-        config = AdjudicationConfig(
-            draw_threshold_cp=10, draw_consecutive_moves=3, draw_min_move=5
-        )
+        config = AdjudicationConfig(draw_threshold_cp=10, draw_consecutive_moves=3, draw_min_move=5)
         white_scores = [5, -3, 8]
         black_scores = [-2, 7, -5]
         result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
@@ -108,9 +104,7 @@ class TestDrawAdjudication:
 
     def test_no_draw_eval_too_high(self) -> None:
         """One eval above threshold -> no draw."""
-        config = AdjudicationConfig(
-            draw_threshold_cp=10, draw_consecutive_moves=3, draw_min_move=5
-        )
+        config = AdjudicationConfig(draw_threshold_cp=10, draw_consecutive_moves=3, draw_min_move=5)
         white_scores = [5, -3, 50]
         black_scores = [-2, 7, -5]
         result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
