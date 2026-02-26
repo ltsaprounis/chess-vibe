@@ -4,6 +4,8 @@
 
 Chess engine development suite — monorepo with a Python chess engine, custom SPRT testing framework, FastAPI backend, and React/TypeScript frontend. Engines are opaque UCI subprocesses; no engine code is ever imported directly.
 
+For architecture principles, component boundaries, and the high-level system diagram, see [`.github/prompts/architecture.md`](prompts/architecture.md).
+
 ## Ownership Boundary
 
 - **`engines/my-engine/`** — Human-only. **Never generate, modify, or refactor any file under this path.**

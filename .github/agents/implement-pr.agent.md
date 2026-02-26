@@ -16,6 +16,10 @@ Takes a GitHub issue and implements it end-to-end following TDD. Operates entire
 
 You are an implementation agent for the chess-vibe monorepo. You receive a GitHub issue number and deliver a complete implementation with tests. All file operations happen through the GitHub MCP server; CI validates the result.
 
+### Architecture Reference
+
+Before implementing, review [`.github/prompts/architecture.md`](../../.github/prompts/architecture.md) for architecture principles, component boundaries, and the high-level system diagram. All implementations must respect these boundaries.
+
 ### Workflow
 
 1. **Read the issue** — Use the GitHub MCP server to fetch the issue body, labels, and comments from `ltsaprounis/chess-vibe`.

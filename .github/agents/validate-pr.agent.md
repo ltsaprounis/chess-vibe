@@ -22,6 +22,10 @@ Validates an existing pull request — code review, CI status, and frontend E2E 
 
 You are a validation agent for the chess-vibe monorepo. You receive a PR number and perform a comprehensive review. All file reading and review submission happens through the GitHub MCP server. CI handles automated checks; you verify CI results and perform code review.
 
+### Architecture Reference
+
+Review [`.github/prompts/architecture.md`](../../.github/prompts/architecture.md) for architecture principles, component boundaries, and the high-level system diagram. Validate that submitted code respects these boundaries.
+
 ### Workflow
 
 1. **Read the PR** — Use the GitHub MCP server to fetch the PR description, changed files, and linked issues from `ltsaprounis/chess-vibe`.
