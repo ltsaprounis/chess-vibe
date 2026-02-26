@@ -268,7 +268,11 @@ async def play_game(
 
         # Check adjudication
         adj_result = check_adjudication(
-            white_scores, black_scores, move_number=full_moves, config=config.adjudication
+            white_scores,
+            black_scores,
+            move_number=full_moves,
+            config=config.adjudication,
+            board=board,
         )
         if adj_result is not None:
             logger.info("Adjudication: %s", adj_result.reason)

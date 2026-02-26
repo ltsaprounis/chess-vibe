@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import chess
 from sprt_runner.adjudication import (
     AdjudicationConfig,
     AdjudicationType,
@@ -135,3 +139,113 @@ class TestAdjudicationDisabled:
         black_scores = [-2, 7, -5]
         result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
         assert result is None
+
+
+class TestSyzygyAdjudication:
+    """Tests for Syzygy tablebase adjudication logic."""
+
+    def test_syzygy_white_wins(self, tmp_path: Path) -> None:
+        """Tablebase probe shows white wins."""
+        config = AdjudicationConfig(
+            syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        # KQ vs K — white to move, white wins
+        board = chess.Board("8/8/8/8/8/8/1k6/KQ6 w - - 0 1")
+        mock_tb = MagicMock()
+        mock_tb.probe_wdl.return_value = 2  # Win
+        mock_tb.__enter__ = MagicMock(return_value=mock_tb)
+        mock_tb.__exit__ = MagicMock(return_value=False)
+
+        with patch("chess.syzygy.open_tablebase", return_value=mock_tb):
+            result = check_adjudication([], [], move_number=100, config=config, board=board)
+
+        assert result is not None
+        assert result.adjudication_type == AdjudicationType.WIN_WHITE
+        assert "Syzygy" in result.reason
+
+    def test_syzygy_black_wins(self, tmp_path: Path) -> None:
+        """Tablebase probe shows black wins (side to move wins, turn is black)."""
+        config = AdjudicationConfig(
+            syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        board = chess.Board("8/8/8/8/8/8/1K6/kq6 b - - 0 1")
+        mock_tb = MagicMock()
+        mock_tb.probe_wdl.return_value = 2  # Win for side to move (black)
+        mock_tb.__enter__ = MagicMock(return_value=mock_tb)
+        mock_tb.__exit__ = MagicMock(return_value=False)
+
+        with patch("chess.syzygy.open_tablebase", return_value=mock_tb):
+            result = check_adjudication([], [], move_number=100, config=config, board=board)
+
+        assert result is not None
+        assert result.adjudication_type == AdjudicationType.WIN_BLACK
+
+    def test_syzygy_draw(self, tmp_path: Path) -> None:
+        """Tablebase probe shows draw."""
+        config = AdjudicationConfig(
+            syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        board = chess.Board("8/8/8/8/8/8/1k6/K7 w - - 0 1")
+        mock_tb = MagicMock()
+        mock_tb.probe_wdl.return_value = 0  # Draw
+        mock_tb.__enter__ = MagicMock(return_value=mock_tb)
+        mock_tb.__exit__ = MagicMock(return_value=False)
+
+        with patch("chess.syzygy.open_tablebase", return_value=mock_tb):
+            result = check_adjudication([], [], move_number=100, config=config, board=board)
+
+        assert result is not None
+        assert result.adjudication_type == AdjudicationType.DRAW
+        assert "Syzygy" in result.reason
+
+    def test_syzygy_too_many_pieces(self, tmp_path: Path) -> None:
+        """Should not probe tablebase when too many pieces on board."""
+        config = AdjudicationConfig(
+            syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        board = chess.Board()  # Starting position has 32 pieces
+        result = check_adjudication([], [], move_number=100, config=config, board=board)
+        assert result is None
+
+    def test_syzygy_disabled_when_no_path(self) -> None:
+        """No tablebase adjudication when syzygy_path is None."""
+        config = AdjudicationConfig(
+            syzygy_path=None, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        board = chess.Board("8/8/8/8/8/8/1k6/KQ6 w - - 0 1")
+        result = check_adjudication([], [], move_number=100, config=config, board=board)
+        assert result is None
+
+    def test_syzygy_key_error_returns_none(self, tmp_path: Path) -> None:
+        """KeyError from tablebase probe (position not found) returns None."""
+        config = AdjudicationConfig(
+            syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        board = chess.Board("8/8/8/8/8/8/1k6/KQ6 w - - 0 1")
+        mock_tb = MagicMock()
+        mock_tb.probe_wdl.side_effect = KeyError("not found")
+        mock_tb.__enter__ = MagicMock(return_value=mock_tb)
+        mock_tb.__exit__ = MagicMock(return_value=False)
+
+        with patch("chess.syzygy.open_tablebase", return_value=mock_tb):
+            result = check_adjudication([], [], move_number=100, config=config, board=board)
+
+        assert result is None
+
+    def test_syzygy_side_to_move_loses(self, tmp_path: Path) -> None:
+        """When WDL < 0, side to move loses — result depends on who moved."""
+        config = AdjudicationConfig(
+            syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        # White to move but loses
+        board = chess.Board("8/8/8/8/8/8/1k6/K7 w - - 0 1")
+        mock_tb = MagicMock()
+        mock_tb.probe_wdl.return_value = -2  # Loss for side to move
+        mock_tb.__enter__ = MagicMock(return_value=mock_tb)
+        mock_tb.__exit__ = MagicMock(return_value=False)
+
+        with patch("chess.syzygy.open_tablebase", return_value=mock_tb):
+            result = check_adjudication([], [], move_number=100, config=config, board=board)
+
+        assert result is not None
+        assert result.adjudication_type == AdjudicationType.WIN_BLACK
