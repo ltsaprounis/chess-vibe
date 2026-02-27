@@ -59,23 +59,18 @@ For each tagged issue:
    git worktree add /tmp/chess-vibe-review-<pr-number> origin/<branch-name>
    cd /tmp/chess-vibe-review-<pr-number>
    ```
-   **Clean environment setup (mandatory):** For every affected Python component (`shared/`, `sprt-runner/`, `backend/`), create a fresh virtual environment and install dependencies before running any checks:
+   **Clean environment setup (mandatory):** Always set up **all** components regardless of which the PR touches — the backend depends on `shared/` and references `sprt-runner/` and engine binaries at runtime:
    ```bash
-   cd <component-dir>   # e.g. shared/, backend/, sprt-runner/
-   uv venv
-   uv sync
-   ```
-   For the frontend, install dependencies:
-   ```bash
-   cd frontend && npm ci
+   cd /tmp/chess-vibe-review-<pr-number>
+   make setup
    ```
    This ensures validation runs against the PR code in isolation, not against whatever is in your current checkout.
-4. **Run local validation** — Inside the worktree, run the full validation suite for each affected component:
-   - **Tests:** `uv run pytest` (Python) / `npm run test:ci` (frontend)
-   - **Linting:** `ruff check .` (Python) / `npx eslint src/` (frontend)
-   - **Formatting:** `ruff format . --check` (Python) / `npx prettier --check src/` (frontend)
-   - **Type checking:** `uv run pyright` (Python) / `npx tsc --noEmit` (frontend)
-   - Compare these local results with the GitHub Actions CI status. If CI has not run yet, your local results serve as the primary validation.
+4. **Run local validation** — Inside the worktree, run the full test and lint suites:
+   ```bash
+   make test
+   make lint
+   ```
+   Compare these local results with the GitHub Actions CI status. If CI has not run yet, your local results serve as the primary validation.
 5. **Review requirements + code** — Validate issue requirements and review diff/changed files for:
    - Adherence to coding conventions (see `.github/copilot-instructions.md`).
    - Test coverage — every new public function/route/component must have tests (TDD).
@@ -86,18 +81,41 @@ For each tagged issue:
    - No commented-out code.
    - Conventional commit messages.
 6. **Frontend E2E validation** (if frontend is affected, including indirect impact from backend/API/protocol changes):
-   - Use the **Playwright MCP server** to validate the deployed preview or a GitHub Codespace.
    - Treat the frontend as affected when PR changes alter UI-facing contracts, for example:
      - REST response/request schema or validation behavior consumed by the frontend
      - WebSocket message/event shape, sequencing, or error payloads
      - Route availability, auth behavior, or endpoint semantics used by frontend flows
+
+   **Start local dev servers in the worktree:**
+   ```bash
+   cd /tmp/chess-vibe-review-<pr-number>
+   make dev &
+   DEV_PID=$!
+
+   # Wait for both servers to be ready (up to 30s)
+   timeout 30 bash -c 'until curl -sf http://127.0.0.1:8000/docs >/dev/null 2>&1; do sleep 1; done'
+   timeout 30 bash -c 'until curl -sf http://127.0.0.1:5173 >/dev/null 2>&1; do sleep 1; done'
+   ```
+
+   **Run Playwright against `http://127.0.0.1:5173`:**
+   - Use the **Playwright MCP server** to navigate and interact with the running app.
    - Navigate to key pages (`/play`, `/sprt`, `/games`).
    - Interact with components (chessboard, engine selector, SPRT dashboard).
    - Verify: pages render without errors, WebSocket connections establish, UI elements are interactive, forms submit correctly.
    - **Capture a screenshot** via `browser_take_screenshot` after each key assertion as evidence for the validation report.
-   - If no preview/Codespace URL is available, treat E2E as **non-blocking**: do not fail solely for missing environment. Add explicit PR review comments listing what could not be validated and why.
-7. **Clean up worktree** — After validation is complete, remove the worktree:
+
+   **Tear down servers after E2E:**
    ```bash
+   kill $DEV_PID 2>/dev/null
+   wait $DEV_PID 2>/dev/null
+   ```
+
+   If server startup fails, treat E2E as **non-blocking**: record the failure reason (command, exit code, stderr) in the report and continue with remaining validation steps.
+7. **Clean up** — After validation is complete, ensure dev servers are stopped and remove the worktree:
+   ```bash
+   kill $DEV_PID 2>/dev/null
+   wait $DEV_PID 2>/dev/null
+
    git worktree remove /tmp/chess-vibe-review-<pr-number> --force
    ```
 8. **Submit review** — Submit a GitHub review with a **concise summary** (pass/fail counts, key findings) and actionable **line comments** on specific issues. Do not put the full report table in the review body.
@@ -148,7 +166,7 @@ This rule applies globally to **all** validation steps (local CI, code review, E
 - [ ] Architectural boundaries are preserved (opaque UCI engines, repository ABC for persistence, backend↔SPRT via CLI + JSON-lines)
 - [ ] No changes under `engines/my-engine/`
 - [ ] Changed code follows repo conventions (typing, explicit errors, no production `print()`, no commented-out code)
-- [ ] Frontend E2E is validated when applicable, or documented as non-blocking when environment is unavailable
+- [ ] Frontend E2E is validated against local dev servers when applicable, or documented as non-blocking when server startup fails
 
 ### Tools
 

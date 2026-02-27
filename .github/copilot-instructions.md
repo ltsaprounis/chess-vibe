@@ -15,9 +15,9 @@ For architecture principles, component boundaries, and the high-level system dia
 
 | Component | Tech |
 |---|---|
-| Backend | Python 3.14+, FastAPI, uvicorn |
-| SPRT Runner | Python 3.14+, asyncio + multiprocessing |
-| Shared lib | Python 3.14+, python-chess |
+| Backend | Python 3.13+, FastAPI, uvicorn |
+| SPRT Runner | Python 3.13+, asyncio + multiprocessing |
+| Shared lib | Python 3.13+, python-chess |
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS |
 | Package mgmt | `uv` (Python), `npm` (frontend) |
 | Testing | pytest (Python), Vitest + React Testing Library (frontend) |
@@ -68,7 +68,7 @@ npm run test:ci                  # Single run with coverage
 ### Top-level
 
 ```bash
-scripts/test.sh                  # Runs all test suites across all components
+make test                        # Runs all test suites across all components
 ```
 
 ## Linting & Formatting
@@ -106,7 +106,7 @@ npx prettier --write src/        # Format
 ### Local pre-push check
 
 ```bash
-scripts/lint.sh                  # Runs all lint + format + type-check
+make lint                        # Runs all lint + format + type-check
 ```
 
 ## Coding Conventions

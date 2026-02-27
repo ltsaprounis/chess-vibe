@@ -2,7 +2,7 @@
 name = "sprt-runner"
 version = "0.1.0"
 description = "SPRT testing framework for chess engines"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 dependencies = [
     "shared",
 ]
@@ -15,7 +15,7 @@ build-backend = "hatchling.build"
 packages = ["src/sprt_runner"]
 
 [tool.pyright]
-pythonVersion = "3.14"
+pythonVersion = "3.13"
 typeCheckingMode = "strict"
 venvPath = "."
 venv = ".venv"
