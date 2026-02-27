@@ -60,7 +60,6 @@ class TestGameManager:
             player_color="white",
             board=chess.Board(),
         )
-        manager._sessions["test-1"] = session
 
         san, fen = manager.apply_player_move(session, "e2e4")
         assert san == "e4"
@@ -76,7 +75,6 @@ class TestGameManager:
             player_color="white",
             board=chess.Board(),
         )
-        manager._sessions["test-1"] = session
 
         with pytest.raises(ValueError, match="Illegal move"):
             manager.apply_player_move(session, "e1e8")
@@ -167,7 +165,6 @@ class TestGameManager:
             board=chess.Board(),
             client=mock_client,
         )
-        manager._sessions["test-1"] = session
 
         uci_move, san, _fen, last_info = await manager.make_engine_move(session)
         assert uci_move == "e2e4"
