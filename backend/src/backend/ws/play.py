@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from shared.engine_registry import load_registry
+from shared.storage.models import GameResult
 
 from backend.models import EngineMoveMessage, ErrorMessage, GameOverMessage
 from backend.services.game_manager import GameManager
@@ -164,8 +165,6 @@ async def play_websocket(websocket: WebSocket) -> None:
                 if session is None:
                     continue
                 # Player resigns — engine wins
-                from shared.storage.models import GameResult
-
                 if session.player_color == "white":
                     result = GameResult.BLACK_WIN
                 else:

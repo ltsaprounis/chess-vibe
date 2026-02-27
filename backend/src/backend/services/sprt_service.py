@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from shared.storage.models import SPRTOutcome, SPRTStatus, SPRTTest
+from shared.storage.models import SPRTOutcome, SPRTStatus, SPRTTest, SPRTTestFilter
 from shared.storage.repository import SPRTTestRepository
 
 from backend.converters import time_control_from_string
@@ -259,8 +259,6 @@ class SPRTService:
         Returns:
             Number of tests marked as cancelled.
         """
-        from shared.storage.models import SPRTTestFilter
-
         running_tests = self._test_repo.list_sprt_tests(SPRTTestFilter(status=SPRTStatus.RUNNING))
         count = 0
         for test in running_tests:
