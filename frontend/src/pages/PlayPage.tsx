@@ -152,22 +152,19 @@ export function PlayPage(): React.JSX.Element {
       if (!isPlayerTurn) return false
 
       const uci = `${sourceSquare}${targetSquare}`
-      let valid = makeMove(uci)
-
-      // If invalid, try queen promotion
-      if (!valid) {
-        const promoUci = `${uci}q`
-        valid = makeMove(promoUci)
-        if (valid) {
-          sendMessage({ type: 'move', move: promoUci })
-          return true
-        }
-      }
-
-      if (valid) {
+      if (makeMove(uci)) {
         sendMessage({ type: 'move', move: uci })
+        return true
       }
-      return valid
+
+      // Try queen promotion
+      const promoUci = `${uci}q`
+      if (makeMove(promoUci)) {
+        sendMessage({ type: 'move', move: promoUci })
+        return true
+      }
+
+      return false
     },
     [playerColor, turn, makeMove, sendMessage],
   )
