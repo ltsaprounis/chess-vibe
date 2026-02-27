@@ -2,7 +2,7 @@
 # ────────────────────────────────────────────────────────────────────
 # Targets: setup, test, lint, dev, dev-backend, dev-frontend, clean
 
-PYTHON_COMPONENTS := shared engines/random-engine sprt-runner backend
+PYTHON_COMPONENTS := shared sprt-runner backend
 PYTHON_VERSION    := 3.13
 
 .PHONY: help setup test lint dev dev-backend dev-frontend clean
@@ -73,10 +73,18 @@ dev-frontend: ## Start the Vite dev server on :5173
 	@cd $(CURDIR)/frontend && npx vite --host 127.0.0.1 --port 5173
 
 dev: ## Start backend + frontend (use Ctrl-C to stop both)
-	@trap 'kill 0' INT TERM; \
+	@cleanup() { \
+		kill $$BACKEND_PID $$FRONTEND_PID 2>/dev/null; \
+		wait $$BACKEND_PID $$FRONTEND_PID 2>/dev/null; \
+		fuser -k 8000/tcp 2>/dev/null; \
+		fuser -k 5173/tcp 2>/dev/null; \
+	}; \
+	trap cleanup INT TERM EXIT; \
 	cd $(CURDIR)/backend && uv run uvicorn backend.main:create_app \
 		--factory --host 127.0.0.1 --port 8000 --reload & \
+	BACKEND_PID=$$!; \
 	cd $(CURDIR)/frontend && npx vite --host 127.0.0.1 --port 5173 & \
+	FRONTEND_PID=$$!; \
 	wait
 
 # ── Clean ───────────────────────────────────────────────────────────
