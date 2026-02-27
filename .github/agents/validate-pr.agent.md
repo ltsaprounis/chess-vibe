@@ -86,16 +86,21 @@ For each tagged issue:
      - WebSocket message/event shape, sequencing, or error payloads
      - Route availability, auth behavior, or endpoint semantics used by frontend flows
 
-   **Start local dev servers in the worktree:**
+   **Start local dev servers in the worktree (start each server individually for reliable PID tracking):**
    ```bash
    cd /tmp/chess-vibe-review-<pr-number>
-   make dev &
-   DEV_PID=$!
 
-   # Wait for both servers to be ready (up to 30s)
-   timeout 30 bash -c 'until curl -sf http://127.0.0.1:8000/docs >/dev/null 2>&1; do sleep 1; done'
-   timeout 30 bash -c 'until curl -sf http://127.0.0.1:5173 >/dev/null 2>&1; do sleep 1; done'
+   # Start backend and frontend as separate background processes
+   make dev-backend &
+   BACKEND_PID=$!
+   make dev-frontend &
+   FRONTEND_PID=$!
+
+   # Wait for both servers to be ready (up to 60s each)
+   timeout 60 bash -c 'until curl -sf http://127.0.0.1:8000/docs >/dev/null 2>&1; do sleep 2; done'
+   timeout 60 bash -c 'until curl -sf http://127.0.0.1:5173 >/dev/null 2>&1; do sleep 2; done'
    ```
+   > **Do not use `make dev &`.** That target uses `trap 'kill 0'` and `wait` internally, making PID management unreliable when backgrounded.
 
    **Run Playwright against `http://127.0.0.1:5173`:**
    - Use the **Playwright MCP server** to navigate and interact with the running app.
@@ -106,15 +111,15 @@ For each tagged issue:
 
    **Tear down servers after E2E:**
    ```bash
-   kill $DEV_PID 2>/dev/null
-   wait $DEV_PID 2>/dev/null
+   kill $BACKEND_PID $FRONTEND_PID 2>/dev/null
+   wait $BACKEND_PID $FRONTEND_PID 2>/dev/null
    ```
 
    If server startup fails, treat E2E as **non-blocking**: record the failure reason (command, exit code, stderr) in the report and continue with remaining validation steps.
 7. **Clean up** — After validation is complete, ensure dev servers are stopped and remove the worktree:
    ```bash
-   kill $DEV_PID 2>/dev/null
-   wait $DEV_PID 2>/dev/null
+   kill $BACKEND_PID $FRONTEND_PID 2>/dev/null
+   wait $BACKEND_PID $FRONTEND_PID 2>/dev/null
 
    git worktree remove /tmp/chess-vibe-review-<pr-number> --force
    ```
