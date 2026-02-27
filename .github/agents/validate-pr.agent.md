@@ -49,23 +49,13 @@ For each tagged issue:
 
 1. **Read PR + linked issues** — Fetch PR description, changed files, linked issues, and CI status from `ltsaprounis/chess-vibe`.
 2. **Identify affected components** — Determine impacted areas (`shared/`, `sprt-runner/`, `backend/`, `frontend/`, `scripts/`).
-3. **Set up a git worktree for the PR branch** — Check out the PR branch into an isolated worktree so you can inspect and run the code without affecting the current working tree:
+3. **Switch to the PR branch** — The environment is ephemeral with `uv` and Node.js pre-installed by `copilot-setup-steps.yml`. Check out the PR branch and install all dependencies:
    ```bash
-   # Fetch the PR branch
    git fetch origin <branch-name>
-   # Remove any stale worktree from a previous run
-   git worktree remove /tmp/chess-vibe-review-<pr-number> --force 2>/dev/null
-   # Create the worktree
-   git worktree add /tmp/chess-vibe-review-<pr-number> origin/<branch-name>
-   cd /tmp/chess-vibe-review-<pr-number>
-   ```
-   **Clean environment setup (mandatory):** Always set up **all** components regardless of which the PR touches — the backend depends on `shared/` and references `sprt-runner/` and engine binaries at runtime:
-   ```bash
-   cd /tmp/chess-vibe-review-<pr-number>
+   git checkout <branch-name>
    make setup
    ```
-   This ensures validation runs against the PR code in isolation, not against whatever is in your current checkout.
-4. **Run local validation** — Inside the worktree, run the full test and lint suites:
+4. **Run local validation** — Run the full test and lint suites:
    ```bash
    make test
    make lint
@@ -80,16 +70,10 @@ For each tagged issue:
    - Proper error handling — no silently swallowed exceptions.
    - No commented-out code.
    - Conventional commit messages.
-6. **Frontend E2E validation** (if frontend is affected, including indirect impact from backend/API/protocol changes):
-   - Treat the frontend as affected when PR changes alter UI-facing contracts, for example:
-     - REST response/request schema or validation behavior consumed by the frontend
-     - WebSocket message/event shape, sequencing, or error payloads
-     - Route availability, auth behavior, or endpoint semantics used by frontend flows
+6. **Frontend E2E validation (mandatory)** — **Always run this step, regardless of which components the PR touches.** Even backend-only or shared-only changes can break the frontend at runtime. This step is the final integration gate.
 
-   **Start local dev servers in the worktree (start each server individually for reliable PID tracking):**
+   **Start local dev servers (start each server individually for reliable PID tracking):**
    ```bash
-   cd /tmp/chess-vibe-review-<pr-number>
-
    # Start backend and frontend as separate background processes
    make dev-backend &
    BACKEND_PID=$!
@@ -104,10 +88,10 @@ For each tagged issue:
 
    **Run Playwright against `http://127.0.0.1:5173`:**
    - Use the **Playwright MCP server** to navigate and interact with the running app.
-   - Navigate to key pages (`/play`, `/sprt`, `/games`).
+   - Navigate to **every** key page (`/play`, `/sprt`, `/games`).
    - Interact with components (chessboard, engine selector, SPRT dashboard).
    - Verify: pages render without errors, WebSocket connections establish, UI elements are interactive, forms submit correctly.
-   - **Capture a screenshot** via `browser_take_screenshot` after each key assertion as evidence for the validation report.
+   - **Capture a screenshot** via `browser_take_screenshot` after **every** page navigation and after each key interaction/assertion. Screenshots are **required evidence** — a validation report without screenshots is incomplete.
 
    **Tear down servers after E2E:**
    ```bash
@@ -115,18 +99,11 @@ For each tagged issue:
    wait $BACKEND_PID $FRONTEND_PID 2>/dev/null
    ```
 
-   If server startup fails, treat E2E as **non-blocking**: record the failure reason (command, exit code, stderr) in the report and continue with remaining validation steps.
-7. **Clean up** — After validation is complete, ensure dev servers are stopped and remove the worktree:
-   ```bash
-   kill $BACKEND_PID $FRONTEND_PID 2>/dev/null
-   wait $BACKEND_PID $FRONTEND_PID 2>/dev/null
-
-   git worktree remove /tmp/chess-vibe-review-<pr-number> --force
-   ```
-8. **Submit review** — Submit a GitHub review with a **concise summary** (pass/fail counts, key findings) and actionable **line comments** on specific issues. Do not put the full report table in the review body.
+   If server startup fails, record the failure reason (command, exit code, stderr) in the report as ❌ FAIL — **do not skip E2E silently**. Continue with remaining validation steps.
+7. **Submit review** — Submit a GitHub review with a **concise summary** (pass/fail counts, key findings) and actionable **line comments** on specific issues. Do not put the full report table in the review body.
    - **Approve** if all criteria pass and code quality is good.
    - **Request changes** if any blocking issue exists.
-9. **Post full validation report as a PR comment** — Post the complete structured report as a **comment on the PR** using the GitHub MCP server. This is where the detailed table lives, ensuring all reviewers can see it in the PR timeline.
+8. **Post full validation report as a PR comment** — Post the complete structured report as a **comment on the PR** using the GitHub MCP server. This is where the detailed table lives, ensuring all reviewers can see it in the PR timeline.
    - If a previous validation comment from this agent already exists on the PR, **update it** instead of creating a duplicate.
 
    Use this template:
@@ -171,7 +148,7 @@ This rule applies globally to **all** validation steps (local CI, code review, E
 - [ ] Architectural boundaries are preserved (opaque UCI engines, repository ABC for persistence, backend↔SPRT via CLI + JSON-lines)
 - [ ] No changes under `engines/my-engine/`
 - [ ] Changed code follows repo conventions (typing, explicit errors, no production `print()`, no commented-out code)
-- [ ] Frontend E2E is validated against local dev servers when applicable, or documented as non-blocking when server startup fails
+- [ ] Frontend E2E is validated via Playwright against local dev servers with screenshots captured for every page and key interaction — server startup failures are recorded as ❌ FAIL
 
 ### Tools
 
