@@ -27,6 +27,11 @@ jobs:
         with:
           python-version: "3.13"
 
+      # Pre-populate uv's managed Python cache so that `uv venv --python 3.13`
+      # does not attempt a download at agent runtime (blocked by firewall).
+      - name: Cache Python for uv
+        run: uv python install 3.13
+
       # ── Node.js ──────────────────────────────────────────────────
       - name: Setup Node.js
         uses: actions/setup-node@v4
