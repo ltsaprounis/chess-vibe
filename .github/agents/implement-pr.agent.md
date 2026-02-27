@@ -6,7 +6,6 @@
 
 name: implement-pr
 description: takes a github issue and implements a PR
-target: github-copilot
 ---
 
 # Implement Agent
