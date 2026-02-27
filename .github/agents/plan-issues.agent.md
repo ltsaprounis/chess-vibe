@@ -1,7 +1,6 @@
 ---
 name: plan-issues
 description: Takes a high-level prompt and breaks it down into a set of GitHub issues with dependencies, acceptance criteria, and implementation details.
-target: github-copilot
 ---
 
 # Plan Issues Agent
