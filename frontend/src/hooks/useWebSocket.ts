@@ -96,9 +96,13 @@ export function useWebSocket<T = unknown>(
 
       ws.onmessage = (event: MessageEvent) => {
         if (unmountedRef.current) return
-        const data = JSON.parse(event.data as string) as T
-        setLastMessage(data)
-        onMessageRef.current?.(data)
+        try {
+          const data = JSON.parse(event.data as string) as T
+          setLastMessage(data)
+          onMessageRef.current?.(data)
+        } catch {
+          onErrorRef.current?.(new ErrorEvent('error', { message: 'Failed to parse message' }))
+        }
       }
 
       ws.onerror = (event: Event) => {
@@ -137,7 +141,9 @@ export function useWebSocket<T = unknown>(
   }, [url])
 
   const sendMessage = useCallback((data: unknown) => {
-    wsRef.current?.send(JSON.stringify(data))
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(data))
+    }
   }, [])
 
   return {
