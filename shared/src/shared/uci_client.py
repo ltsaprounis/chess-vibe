@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 import time
 from dataclasses import dataclass, field
 
@@ -218,8 +219,9 @@ class UCIClient:
             return
 
         try:
+            argv = shlex.split(self.engine_path)
             self._process = await asyncio.create_subprocess_exec(
-                self.engine_path,
+                *argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
