@@ -1,3 +1,5 @@
+import { useEffect, useRef } from 'react'
+
 export interface MoveItem {
   san: string
   annotation?: string
@@ -29,11 +31,33 @@ function groupMoves(moves: MoveItem[]): MovePair[] {
   return pairs
 }
 
+/** Threshold in pixels — auto-scroll only when within this distance of the bottom. */
+const SCROLL_THRESHOLD = 50
+
 export function MoveList({
   moves,
   currentMoveIndex,
   onMoveClick,
 }: MoveListProps): React.JSX.Element {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const prevMovesLengthRef = useRef(moves.length)
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container || moves.length <= prevMovesLengthRef.current) {
+      prevMovesLengthRef.current = moves.length
+      return
+    }
+    prevMovesLengthRef.current = moves.length
+
+    const { scrollTop, scrollHeight, clientHeight } = container
+    const isNearBottom = scrollHeight - scrollTop - clientHeight <= SCROLL_THRESHOLD
+    if (isNearBottom) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [moves.length])
+
   if (moves.length === 0) {
     return <div className="p-4 text-gray-400">No moves</div>
   }
@@ -41,7 +65,7 @@ export function MoveList({
   const pairs = groupMoves(moves)
 
   return (
-    <div className="overflow-y-auto rounded bg-gray-800 p-2 text-sm">
+    <div ref={containerRef} className="h-full overflow-y-auto rounded bg-gray-800 p-2 text-sm">
       {pairs.map((pair) => (
         <div key={pair.moveNumber} className="flex items-baseline gap-1 py-0.5">
           <span className="w-8 shrink-0 text-right text-gray-500">{pair.moveNumber}.</span>
@@ -61,6 +85,7 @@ export function MoveList({
           )}
         </div>
       ))}
+      <div ref={bottomRef} />
     </div>
   )
 }

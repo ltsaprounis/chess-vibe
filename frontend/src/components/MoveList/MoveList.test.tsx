@@ -4,6 +4,11 @@ import { describe, it, expect, vi } from 'vitest'
 import { MoveList } from './MoveList'
 import type { MoveItem } from './MoveList'
 
+/** Generate a list of N dummy half-moves. */
+function makeMoves(count: number): MoveItem[] {
+  return Array.from({ length: count }, (_, i) => ({ san: `m${i}` }))
+}
+
 describe('MoveList', () => {
   const sampleMoves: MoveItem[] = [
     { san: 'e4' },
@@ -93,5 +98,43 @@ describe('MoveList', () => {
     // Verify all 3 move numbers present for 5 moves
     const moveNumbers = screen.getAllByText(/^\d+\.$/)
     expect(moveNumbers).toHaveLength(3)
+  })
+
+  it('renders a scrollable container with h-full', () => {
+    const { container } = render(<MoveList moves={sampleMoves} currentMoveIndex={0} />)
+    const scrollContainer = container.querySelector('.overflow-y-auto')
+    expect(scrollContainer).toBeInTheDocument()
+    expect(scrollContainer).toHaveClass('h-full')
+  })
+
+  it('auto-scrolls when a new move is added and user is near the bottom', () => {
+    const scrollIntoViewMock = vi.fn()
+    // jsdom doesn't implement scrollIntoView, so we stub it on the prototype
+    HTMLElement.prototype.scrollIntoView = scrollIntoViewMock
+
+    const moves = makeMoves(4)
+    const { rerender } = render(<MoveList moves={moves} currentMoveIndex={3} />)
+
+    // Simulate user being near the bottom (default jsdom scroll values are 0)
+    const newMoves = makeMoves(5)
+    rerender(<MoveList moves={newMoves} currentMoveIndex={4} />)
+
+    expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: 'smooth', block: 'nearest' })
+  })
+
+  it('does not auto-scroll when moves are reset to fewer moves', () => {
+    const scrollIntoViewMock = vi.fn()
+    HTMLElement.prototype.scrollIntoView = scrollIntoViewMock
+
+    const moves = makeMoves(10)
+    const { rerender } = render(<MoveList moves={moves} currentMoveIndex={9} />)
+
+    scrollIntoViewMock.mockClear()
+
+    // Fewer moves (e.g. new game reset)
+    const fewerMoves = makeMoves(2)
+    rerender(<MoveList moves={fewerMoves} currentMoveIndex={1} />)
+
+    expect(scrollIntoViewMock).not.toHaveBeenCalled()
   })
 })

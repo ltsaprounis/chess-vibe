@@ -290,7 +290,7 @@ export function PlayPage(): React.JSX.Element {
             <Board position={fen} onPieceDrop={handlePieceDrop} boardOrientation={playerColor} />
 
             {/* Move list */}
-            <div className="h-[600px] w-64">
+            <div className="h-[600px] w-64 overflow-hidden">
               <MoveList moves={moveItems} currentMoveIndex={moves.length - 1} />
             </div>
           </div>
