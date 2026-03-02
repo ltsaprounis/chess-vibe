@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from shared.repo_root import RepoRootNotFoundError, get_repo_root
+from shared.utils import RepoRootNotFoundError, get_repo_root
 
 
 class TestGetRepoRoot:
@@ -48,10 +48,10 @@ class TestGetRepoRoot:
     def test_raises_with_patched_file(self, tmp_path: Path) -> None:
         """Test that the real function raises when __file__ points outside a repo."""
         get_repo_root.cache_clear()
-        fake_file = tmp_path / "repo_root.py"
+        fake_file = tmp_path / "utils.py"
         fake_file.touch()
         with (
-            patch("shared.repo_root.__file__", str(fake_file)),
+            patch("shared.utils.__file__", str(fake_file)),
             pytest.raises(RepoRootNotFoundError),
         ):
             get_repo_root()
