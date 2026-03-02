@@ -37,6 +37,7 @@ from shared.uci_client import (
     parse_bestmove,
     parse_info_line,
 )
+from shared.utils import RepoRootNotFoundError, get_repo_root
 
 __all__ = [
     "BestMove",
@@ -55,6 +56,7 @@ __all__ = [
     "Move",
     "NodesTimeControl",
     "OpeningBook",
+    "RepoRootNotFoundError",
     "SPRTOutcome",
     "SPRTStatus",
     "SPRTTest",
@@ -69,6 +71,7 @@ __all__ = [
     "UCIScore",
     "UCITimeoutError",
     "export_game_to_pgn",
+    "get_repo_root",
     "load_registry",
     "parse_bestmove",
     "parse_info_line",
