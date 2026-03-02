@@ -29,7 +29,7 @@ class TestEnginesRoute:
             )
         ]
         with patch("backend.routes.engines.load_registry", return_value=entries):
-            resp = client.get("/engines")
+            resp = client.get("/api/engines")
             assert resp.status_code == 200
             data = resp.json()
             assert len(data) == 1
@@ -41,5 +41,5 @@ class TestEnginesRoute:
             "backend.routes.engines.load_registry",
             side_effect=EngineRegistryError("bad file"),
         ):
-            resp = client.get("/engines")
+            resp = client.get("/api/engines")
             assert resp.status_code == 500

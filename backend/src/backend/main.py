@@ -112,10 +112,10 @@ def create_app(
     app.state.sprt_service = sprt_service
 
     # Mount routes
-    app.include_router(engines.router)
-    app.include_router(games.router)
-    app.include_router(sprt.router)
-    app.include_router(openings.router)
+    app.include_router(engines.router, prefix="/api")
+    app.include_router(games.router, prefix="/api")
+    app.include_router(sprt.router, prefix="/api")
+    app.include_router(openings.router, prefix="/api")
 
     # Mount WebSocket handlers
     app.include_router(ws_play.router)
