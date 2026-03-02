@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from shared.engine_registry import load_registry
 from shared.storage.models import GameResult
+from shared.utils import get_repo_root
 
 from backend.models import EngineMoveMessage, ErrorMessage, GameOverMessage
 from backend.services.game_manager import GameManager
@@ -40,7 +41,7 @@ def _resolve_engine_path(engine_id: str, registry_path: Path) -> str:
     entries = load_registry(registry_path)
     for entry in entries:
         if entry.id == engine_id:
-            engine_dir = Path(entry.dir)
+            engine_dir = get_repo_root() / entry.dir
             parts = entry.run.split()
             if parts:
                 executable = engine_dir / parts[0]
@@ -76,7 +77,7 @@ async def play_websocket(websocket: WebSocket) -> None:
                 player_color = data.get("player_color", "white")
 
                 try:
-                    engine_path = _resolve_engine_path(engine_id, Path("engines.json"))
+                    engine_path = _resolve_engine_path(engine_id, get_repo_root() / "engines.json")
                 except ValueError as e:
                     await websocket.send_json(ErrorMessage(message=str(e)).model_dump())
                     continue
