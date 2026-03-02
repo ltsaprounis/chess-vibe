@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from backend.ws.play import _resolve_engine_path
+from backend.ws.play import _resolve_engine_path  # type: ignore[reportPrivateUsage]
 from shared.engine_registry import EngineEntry
 
 
