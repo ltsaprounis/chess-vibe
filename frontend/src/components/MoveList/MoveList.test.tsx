@@ -108,9 +108,7 @@ describe('MoveList', () => {
   })
 
   it('auto-scrolls when a new move is added and user is near the bottom', () => {
-    const scrollIntoViewMock = vi.fn()
-    // jsdom doesn't implement scrollIntoView, so we stub it on the prototype
-    HTMLElement.prototype.scrollIntoView = scrollIntoViewMock
+    const scrollIntoViewSpy = vi.spyOn(Element.prototype, 'scrollIntoView')
 
     const moves = makeMoves(4)
     const { rerender } = render(<MoveList moves={moves} currentMoveIndex={3} />)
@@ -119,22 +117,23 @@ describe('MoveList', () => {
     const newMoves = makeMoves(5)
     rerender(<MoveList moves={newMoves} currentMoveIndex={4} />)
 
-    expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: 'smooth', block: 'nearest' })
+    expect(scrollIntoViewSpy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'nearest' })
+    scrollIntoViewSpy.mockRestore()
   })
 
   it('does not auto-scroll when moves are reset to fewer moves', () => {
-    const scrollIntoViewMock = vi.fn()
-    HTMLElement.prototype.scrollIntoView = scrollIntoViewMock
+    const scrollIntoViewSpy = vi.spyOn(Element.prototype, 'scrollIntoView')
 
     const moves = makeMoves(10)
     const { rerender } = render(<MoveList moves={moves} currentMoveIndex={9} />)
 
-    scrollIntoViewMock.mockClear()
+    scrollIntoViewSpy.mockClear()
 
     // Fewer moves (e.g. new game reset)
     const fewerMoves = makeMoves(2)
     rerender(<MoveList moves={fewerMoves} currentMoveIndex={1} />)
 
-    expect(scrollIntoViewMock).not.toHaveBeenCalled()
+    expect(scrollIntoViewSpy).not.toHaveBeenCalled()
+    scrollIntoViewSpy.mockRestore()
   })
 })
