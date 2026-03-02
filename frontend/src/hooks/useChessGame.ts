@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useState } from 'react'
-import { Chess } from 'chess.js'
+import { Chess, type Square } from 'chess.js'
 
 export interface MoveRecord {
   san: string
@@ -25,6 +25,11 @@ export interface EvalData {
   pv?: string[]
 }
 
+export interface LegalMove {
+  to: string
+  isCapture: boolean
+}
+
 export interface UseChessGameOptions {
   startFen?: string
 }
@@ -38,6 +43,7 @@ export interface UseChessGameReturn {
   makeMove: (uci: string) => boolean
   addEngineMove: (uci: string, evalData?: EvalData) => boolean
   reset: (fen?: string) => void
+  getLegalMoves: (square: string) => LegalMove[]
   pgn: string
 }
 
@@ -121,6 +127,24 @@ export function useChessGame(options?: UseChessGameOptions): UseChessGameReturn 
     [applyMove],
   )
 
+  const getLegalMoves = useCallback(
+    (square: string): LegalMove[] => {
+      try {
+        const verboseMoves = chess.moves({
+          square: square as Square,
+          verbose: true,
+        })
+        return verboseMoves.map((m) => ({
+          to: m.to,
+          isCapture: m.isCapture(),
+        }))
+      } catch {
+        return []
+      }
+    },
+    [chess],
+  )
+
   const reset = useCallback(
     (fen?: string) => {
       if (fen) {
@@ -145,6 +169,7 @@ export function useChessGame(options?: UseChessGameOptions): UseChessGameReturn 
     makeMove,
     addEngineMove,
     reset,
+    getLegalMoves,
     pgn,
   }
 }

@@ -382,3 +382,93 @@ describe('reset', () => {
     expect(result.current.turn).toBe('b')
   })
 })
+
+// ---------------------------------------------------------------------------
+// getLegalMoves
+// ---------------------------------------------------------------------------
+
+describe('getLegalMoves', () => {
+  it('returns legal moves for a pawn in the starting position', () => {
+    const { result } = renderHook(() => useChessGame())
+
+    const moves = result.current.getLegalMoves('e2')
+
+    expect(moves).toEqual(
+      expect.arrayContaining([
+        { to: 'e3', isCapture: false },
+        { to: 'e4', isCapture: false },
+      ]),
+    )
+    expect(moves).toHaveLength(2)
+  })
+
+  it('returns capture moves with isCapture true', () => {
+    // Position where white pawn on e4 can capture on d5
+    const captureFen = 'rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2'
+    const { result } = renderHook(() => useChessGame({ startFen: captureFen }))
+
+    const moves = result.current.getLegalMoves('e4')
+
+    expect(moves).toEqual(
+      expect.arrayContaining([
+        { to: 'e5', isCapture: false },
+        { to: 'd5', isCapture: true },
+      ]),
+    )
+  })
+
+  it('returns empty array for an empty square', () => {
+    const { result } = renderHook(() => useChessGame())
+
+    const moves = result.current.getLegalMoves('e4')
+
+    expect(moves).toEqual([])
+  })
+
+  it('returns empty array for an opponent piece', () => {
+    const { result } = renderHook(() => useChessGame())
+
+    // White to move, e7 has a black pawn
+    const moves = result.current.getLegalMoves('e7')
+
+    expect(moves).toEqual([])
+  })
+
+  it('returns empty array for an invalid square', () => {
+    const { result } = renderHook(() => useChessGame())
+
+    const moves = result.current.getLegalMoves('z9')
+
+    expect(moves).toEqual([])
+  })
+
+  it('returns updated legal moves after a move is made', () => {
+    const { result } = renderHook(() => useChessGame())
+
+    act(() => {
+      result.current.makeMove('e2e4')
+    })
+
+    // Now it's black's turn — check black's pawn on d7
+    const moves = result.current.getLegalMoves('d7')
+
+    expect(moves).toEqual(
+      expect.arrayContaining([
+        { to: 'd6', isCapture: false },
+        { to: 'd5', isCapture: false },
+      ]),
+    )
+    expect(moves).toHaveLength(2)
+  })
+
+  it('includes promotion squares', () => {
+    // White pawn on e7 about to promote
+    const promotionFen = '8/4P3/8/8/8/8/8/4K2k w - - 0 1'
+    const { result } = renderHook(() => useChessGame({ startFen: promotionFen }))
+
+    const moves = result.current.getLegalMoves('e7')
+
+    // Should include e8 as a destination (promotion)
+    expect(moves.some((m) => m.to === 'e8')).toBe(true)
+  })
+})

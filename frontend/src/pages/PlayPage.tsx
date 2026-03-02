@@ -54,7 +54,10 @@ export function PlayPage(): React.JSX.Element {
   const [latestEval, setLatestEval] = useState<{ scoreCp?: number; scoreMate?: number }>({})
 
   // Chess game state
-  const { fen, moves, turn, makeMove, addEngineMove, reset } = useChessGame()
+  const { fen, moves, turn, makeMove, addEngineMove, reset, getLegalMoves } = useChessGame()
+
+  // Selected piece state for click-to-move
+  const [selectedSquare, setSelectedSquare] = useState<string | null>(null)
 
   // Ref for start params (sent when WS opens)
   const startParamsRef = useRef<Record<string, unknown> | null>(null)
@@ -120,6 +123,7 @@ export function PlayPage(): React.JSX.Element {
     setGameResult(null)
     setGameId(null)
     setLatestEval({})
+    setSelectedSquare(null)
     reset(customFen || undefined)
 
     startParamsRef.current = {
@@ -138,6 +142,7 @@ export function PlayPage(): React.JSX.Element {
     setGameResult(null)
     setError(null)
     setLatestEval({})
+    setSelectedSquare(null)
     reset()
   }
 
@@ -154,6 +159,7 @@ export function PlayPage(): React.JSX.Element {
       const uci = `${sourceSquare}${targetSquare}`
       if (makeMove(uci)) {
         sendMessage({ type: 'move', move: uci })
+        setSelectedSquare(null)
         return true
       }
 
@@ -161,6 +167,7 @@ export function PlayPage(): React.JSX.Element {
       const promoUci = `${uci}q`
       if (makeMove(promoUci)) {
         sendMessage({ type: 'move', move: promoUci })
+        setSelectedSquare(null)
         return true
       }
 
@@ -168,6 +175,85 @@ export function PlayPage(): React.JSX.Element {
     },
     [playerColor, turn, makeMove, sendMessage],
   )
+
+  // Handle square click for click-to-move
+  const handleSquareClick = useCallback(
+    (square: string): void => {
+      const isPlayerTurn =
+        (playerColor === 'white' && turn === 'w') || (playerColor === 'black' && turn === 'b')
+      if (!isPlayerTurn) {
+        setSelectedSquare(null)
+        return
+      }
+
+      // If a piece is selected and the clicked square is a legal target, make the move
+      if (selectedSquare) {
+        const currentLegalMoves = getLegalMoves(selectedSquare)
+        const isLegalTarget = currentLegalMoves.some((m) => m.to === square)
+
+        if (isLegalTarget) {
+          const uci = `${selectedSquare}${square}`
+          if (makeMove(uci)) {
+            sendMessage({ type: 'move', move: uci })
+            setSelectedSquare(null)
+            return
+          }
+          // Try queen promotion
+          const promoUci = `${uci}q`
+          if (makeMove(promoUci)) {
+            sendMessage({ type: 'move', move: promoUci })
+            setSelectedSquare(null)
+            return
+          }
+        }
+      }
+
+      // If clicking the same square, deselect
+      if (selectedSquare === square) {
+        setSelectedSquare(null)
+        return
+      }
+
+      // If clicking a square with a friendly piece, select it
+      const pieceMoves = getLegalMoves(square)
+      if (pieceMoves.length > 0) {
+        setSelectedSquare(square)
+      } else {
+        setSelectedSquare(null)
+      }
+    },
+    [playerColor, turn, selectedSquare, makeMove, sendMessage, getLegalMoves],
+  )
+
+  // Compute legal moves for the selected square (for highlighting)
+  const legalMoves = selectedSquare ? getLegalMoves(selectedSquare) : []
+  const captureSquares = new Set(legalMoves.filter((m) => m.isCapture).map((m) => m.to))
+
+  // Build square styles for highlighting
+  const squareStyles: Record<string, React.CSSProperties> = {}
+  if (selectedSquare) {
+    squareStyles[selectedSquare] = { backgroundColor: 'rgba(255, 255, 0, 0.4)' }
+    for (const move of legalMoves) {
+      if (captureSquares.has(move.to)) {
+        squareStyles[move.to] = {
+          background: 'radial-gradient(circle, transparent 60%, rgba(0,0,0,0.2) 60%)',
+        }
+      } else {
+        squareStyles[move.to] = {
+          background: 'radial-gradient(circle, rgba(0,0,0,0.2) 25%, transparent 25%)',
+        }
+      }
+    }
+  }
+
+  // Escape key deselects the piece
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setSelectedSquare(null)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [])
 
   // Convert moves to MoveList format
   const moveItems: MoveItem[] = moves.map((m) => ({
@@ -287,7 +373,13 @@ export function PlayPage(): React.JSX.Element {
             </div>
 
             {/* Board */}
-            <Board position={fen} onPieceDrop={handlePieceDrop} boardOrientation={playerColor} />
+            <Board
+              position={fen}
+              onPieceDrop={handlePieceDrop}
+              onSquareClick={handleSquareClick}
+              boardOrientation={playerColor}
+              squareStyles={squareStyles}
+            />
 
             {/* Move list */}
             <div className="h-[600px] w-64 overflow-hidden">

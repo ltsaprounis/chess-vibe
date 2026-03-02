@@ -21,9 +21,14 @@ let capturedBoardOnPieceDrop:
   | ((args: { piece: string; sourceSquare: string; targetSquare: string | null }) => boolean)
   | undefined
 
+let capturedBoardOnSquareClick: ((args: { piece: unknown; square: string }) => void) | undefined
+let capturedSquareStyles: Record<string, React.CSSProperties> | undefined
+
 vi.mock('react-chessboard', () => ({
   Chessboard: ({ options }: { options?: Record<string, unknown> }) => {
     capturedBoardOnPieceDrop = options?.onPieceDrop as typeof capturedBoardOnPieceDrop
+    capturedBoardOnSquareClick = options?.onSquareClick as typeof capturedBoardOnSquareClick
+    capturedSquareStyles = options?.squareStyles as typeof capturedSquareStyles
     return (
       <div
         data-testid="chessboard"
@@ -57,6 +62,8 @@ describe('PlayPage', () => {
     capturedOnMessage = undefined
     capturedOnOpen = undefined
     capturedBoardOnPieceDrop = undefined
+    capturedBoardOnSquareClick = undefined
+    capturedSquareStyles = undefined
 
     vi.mocked(fetchEngines).mockResolvedValue(mockEngines)
 
@@ -392,5 +399,209 @@ describe('PlayPage', () => {
     expect(screen.queryByTestId('chessboard')).not.toBeInTheDocument()
     // Wait for async fetchEngines to settle
     await waitFor(() => expect(screen.getByLabelText('Engine')).toBeInTheDocument())
+  })
+
+  // -----------------------------------------------------------------------
+  // Legal move indicators
+  // -----------------------------------------------------------------------
+
+  async function startGame(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await waitFor(() => {
+      expect(screen.getByLabelText('Engine')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: 'Start Game' }))
+    act(() => capturedOnOpen?.())
+    act(() => {
+      capturedOnMessage?.({
+        type: 'started',
+        game_id: 'game-123',
+        fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+      })
+    })
+  }
+
+  it('shows legal move indicators when clicking a piece', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    // Click on the e2 pawn (white's turn, player is white)
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e2' })
+    })
+
+    // Should have styles for selected square and legal targets
+    expect(capturedSquareStyles).toBeDefined()
+    expect(capturedSquareStyles?.['e2']).toEqual({ backgroundColor: 'rgba(255, 255, 0, 0.4)' })
+    // e2 pawn can move to e3 and e4
+    expect(capturedSquareStyles?.['e3']).toBeDefined()
+    expect(capturedSquareStyles?.['e4']).toBeDefined()
+  })
+
+  it('completes a move when clicking a legal destination square', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    // Select the e2 pawn
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e2' })
+    })
+
+    // Click on e4 (legal move)
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e4' })
+    })
+
+    // Move should have been sent
+    expect(mockSendMessage).toHaveBeenCalledWith({ type: 'move', move: 'e2e4' })
+    // Selection should be cleared
+    expect(capturedSquareStyles).toEqual({})
+  })
+
+  it('switches selection when clicking a different friendly piece', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    // Select the e2 pawn
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e2' })
+    })
+
+    expect(capturedSquareStyles?.['e2']).toBeDefined()
+
+    // Click on d2 pawn instead
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'd2' })
+    })
+
+    // d2 should now be selected, e2 should no longer have selection style
+    expect(capturedSquareStyles?.['d2']).toEqual({ backgroundColor: 'rgba(255, 255, 0, 0.4)' })
+    expect(capturedSquareStyles?.['e2']).toBeUndefined()
+  })
+
+  it('deselects when clicking an empty non-legal square', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    // Select the e2 pawn
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e2' })
+    })
+
+    expect(capturedSquareStyles?.['e2']).toBeDefined()
+
+    // Click on a5 (not a legal target for e2 pawn, empty square)
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'a5' })
+    })
+
+    // Selection should be cleared
+    expect(capturedSquareStyles).toEqual({})
+  })
+
+  it('does not show indicators on opponent turn', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    // Make a move so it's black's turn
+    act(() => {
+      capturedBoardOnPieceDrop?.({
+        piece: 'wP',
+        sourceSquare: 'e2',
+        targetSquare: 'e4',
+      })
+    })
+
+    // Now it's black's turn but player is white — clicking should not select
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e7' })
+    })
+
+    // No styles should be applied
+    expect(capturedSquareStyles).toEqual({})
+  })
+
+  it('clears indicators after a piece drop move', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    // Select the e2 pawn
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e2' })
+    })
+
+    expect(capturedSquareStyles?.['e2']).toBeDefined()
+
+    // Drop a piece instead (drag-and-drop)
+    act(() => {
+      capturedBoardOnPieceDrop?.({
+        piece: 'wP',
+        sourceSquare: 'd2',
+        targetSquare: 'd4',
+      })
+    })
+
+    // Selection should be cleared
+    expect(capturedSquareStyles).toEqual({})
+  })
+
+  it('shows ring style for capture squares', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    // Make moves to set up a capture scenario: 1. e4 d5
+    act(() => {
+      capturedBoardOnPieceDrop?.({
+        piece: 'wP',
+        sourceSquare: 'e2',
+        targetSquare: 'e4',
+      })
+    })
+    act(() => {
+      capturedOnMessage?.({
+        type: 'engine_move',
+        move: 'd7d5',
+      })
+    })
+
+    // Now select the e4 pawn — it can capture on d5
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e4' })
+    })
+
+    // d5 should have capture ring style
+    expect(capturedSquareStyles?.['d5']).toEqual({
+      background: 'radial-gradient(circle, transparent 60%, rgba(0,0,0,0.2) 60%)',
+    })
+    // e5 should have dot style (empty square move)
+    expect(capturedSquareStyles?.['e5']).toEqual({
+      background: 'radial-gradient(circle, rgba(0,0,0,0.2) 25%, transparent 25%)',
+    })
+  })
+
+  it('deselects piece when Escape is pressed', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    // Select the e2 pawn
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e2' })
+    })
+
+    expect(capturedSquareStyles?.['e2']).toBeDefined()
+
+    // Press Escape
+    await user.keyboard('{Escape}')
+
+    // Selection should be cleared
+    expect(capturedSquareStyles).toEqual({})
   })
 })
