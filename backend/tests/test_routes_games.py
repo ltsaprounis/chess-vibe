@@ -45,7 +45,7 @@ class TestGamesRoutes:
         )
 
     def test_list_games_empty(self, client: TestClient) -> None:
-        resp = client.get("/games")
+        resp = client.get("/api/games")
         assert resp.status_code == 200
         assert resp.json() == []
 
@@ -56,7 +56,7 @@ class TestGamesRoutes:
         sample_game: Game,
     ) -> None:
         game_repo.save_game(sample_game)
-        resp = client.get("/games")
+        resp = client.get("/api/games")
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) == 1
@@ -71,16 +71,16 @@ class TestGamesRoutes:
         sample_game: Game,
     ) -> None:
         game_repo.save_game(sample_game)
-        resp = client.get("/games", params={"engine_id": "engine-a"})
+        resp = client.get("/api/games", params={"engine_id": "engine-a"})
         assert resp.status_code == 200
         assert len(resp.json()) == 1
 
-        resp = client.get("/games", params={"engine_id": "engine-x"})
+        resp = client.get("/api/games", params={"engine_id": "engine-x"})
         assert resp.status_code == 200
         assert len(resp.json()) == 0
 
     def test_list_games_invalid_result_filter(self, client: TestClient) -> None:
-        resp = client.get("/games", params={"result": "invalid"})
+        resp = client.get("/api/games", params={"result": "invalid"})
         assert resp.status_code == 400
 
     def test_get_game_found(
@@ -90,7 +90,7 @@ class TestGamesRoutes:
         sample_game: Game,
     ) -> None:
         game_repo.save_game(sample_game)
-        resp = client.get("/games/game-1")
+        resp = client.get("/api/games/game-1")
         assert resp.status_code == 200
         data = resp.json()
         assert data["id"] == "game-1"
@@ -98,5 +98,5 @@ class TestGamesRoutes:
         assert len(data["moves"]) == 1
 
     def test_get_game_not_found(self, client: TestClient) -> None:
-        resp = client.get("/games/nonexistent")
+        resp = client.get("/api/games/nonexistent")
         assert resp.status_code == 404

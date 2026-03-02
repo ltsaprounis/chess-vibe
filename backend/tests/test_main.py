@@ -23,16 +23,16 @@ class TestCreateApp:
     def test_routes_registered(self, tmp_path: Path) -> None:
         app = create_app(data_dir=tmp_path)
         routes = [r.path for r in app.routes if hasattr(r, "path")]  # type: ignore[reportUnknownMemberType,union-attr]
-        assert "/engines" in routes
-        assert "/games" in routes
-        assert "/games/{game_id}" in routes
-        assert "/sprt/tests" in routes
-        assert "/sprt/tests/{test_id}" in routes
-        assert "/openings/books" in routes
+        assert "/api/engines" in routes
+        assert "/api/games" in routes
+        assert "/api/games/{game_id}" in routes
+        assert "/api/sprt/tests" in routes
+        assert "/api/sprt/tests/{test_id}" in routes
+        assert "/api/openings/books" in routes
         assert "/ws/play" in routes
         assert "/ws/sprt/{test_id}" in routes
 
     def test_health_check_via_games(self, tmp_path: Path) -> None:
         client = TestClient(create_app(data_dir=tmp_path), raise_server_exceptions=False)
-        resp = client.get("/games")
+        resp = client.get("/api/games")
         assert resp.status_code == 200

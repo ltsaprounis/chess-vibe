@@ -21,7 +21,7 @@ class TestOpeningsRoutes:
         return TestClient(create_app(data_dir=data_dir), raise_server_exceptions=False)
 
     def test_list_books_empty(self, client: TestClient) -> None:
-        resp = client.get("/openings/books")
+        resp = client.get("/api/openings/books")
         assert resp.status_code == 200
         assert resp.json() == []
 
@@ -31,7 +31,7 @@ class TestOpeningsRoutes:
         (books_dir / "test.pgn").write_text("1. e4 e5 *")
         (books_dir / "positions.epd").write_text("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")
 
-        resp = client.get("/openings/books")
+        resp = client.get("/api/openings/books")
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) == 2
@@ -41,7 +41,7 @@ class TestOpeningsRoutes:
 
     def test_upload_book_pgn(self, client: TestClient, data_dir: Path) -> None:
         resp = client.post(
-            "/openings/books",
+            "/api/openings/books",
             files={"file": ("test.pgn", b"1. e4 e5 *", "application/octet-stream")},
         )
         assert resp.status_code == 201
@@ -57,7 +57,7 @@ class TestOpeningsRoutes:
 
     def test_upload_book_epd(self, client: TestClient) -> None:
         resp = client.post(
-            "/openings/books",
+            "/api/openings/books",
             files={
                 "file": (
                     "positions.epd",
@@ -71,7 +71,7 @@ class TestOpeningsRoutes:
 
     def test_upload_invalid_format(self, client: TestClient) -> None:
         resp = client.post(
-            "/openings/books",
+            "/api/openings/books",
             files={"file": ("test.txt", b"hello", "text/plain")},
         )
         assert resp.status_code == 400

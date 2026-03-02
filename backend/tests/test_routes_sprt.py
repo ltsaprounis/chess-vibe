@@ -51,7 +51,7 @@ class TestSPRTRoutes:
         )
         sprt_repo.save_sprt_test(test)
 
-        resp = client.get("/sprt/tests/test-1")
+        resp = client.get("/api/sprt/tests/test-1")
         assert resp.status_code == 200
         data = resp.json()
         assert data["id"] == "test-1"
@@ -60,9 +60,9 @@ class TestSPRTRoutes:
         assert data["losses"] == 3
 
     def test_get_sprt_test_not_found(self, client: TestClient) -> None:
-        resp = client.get("/sprt/tests/nonexistent")
+        resp = client.get("/api/sprt/tests/nonexistent")
         assert resp.status_code == 404
 
     def test_cancel_nonexistent_test(self, client: TestClient) -> None:
-        resp = client.post("/sprt/tests/nonexistent/cancel")
+        resp = client.post("/api/sprt/tests/nonexistent/cancel")
         assert resp.status_code == 404
