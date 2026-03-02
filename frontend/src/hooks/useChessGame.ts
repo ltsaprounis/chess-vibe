@@ -8,6 +8,7 @@
 
 import { useCallback, useState } from 'react'
 import { Chess } from 'chess.js'
+import type { Square } from 'chess.js'
 
 export interface MoveRecord {
   san: string
@@ -39,6 +40,8 @@ export interface UseChessGameReturn {
   addEngineMove: (uci: string, evalData?: EvalData) => boolean
   reset: (fen?: string) => void
   pgn: string
+  getLegalMoves: (square: string) => string[]
+  isPromotion: (from: string, to: string) => boolean
 }
 
 function getGameResult(chess: Chess): string | null {
@@ -136,6 +139,22 @@ export function useChessGame(options?: UseChessGameOptions): UseChessGameReturn 
     [chess, startFen, syncState],
   )
 
+  const getLegalMoves = useCallback(
+    (square: string): string[] => {
+      const legalMoves = chess.moves({ square: square as Square, verbose: true })
+      return legalMoves.map((m) => m.to)
+    },
+    [chess],
+  )
+
+  const isPromotion = useCallback(
+    (from: string, to: string): boolean => {
+      const legalMoves = chess.moves({ square: from as Square, verbose: true })
+      return legalMoves.some((m) => m.to === to && m.promotion !== undefined)
+    },
+    [chess],
+  )
+
   return {
     fen,
     moves,
@@ -146,5 +165,7 @@ export function useChessGame(options?: UseChessGameOptions): UseChessGameReturn 
     addEngineMove,
     reset,
     pgn,
+    getLegalMoves,
+    isPromotion,
   }
 }

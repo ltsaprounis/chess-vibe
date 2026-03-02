@@ -382,3 +382,57 @@ describe('reset', () => {
     expect(result.current.turn).toBe('b')
   })
 })
+
+// ---------------------------------------------------------------------------
+// getLegalMoves
+// ---------------------------------------------------------------------------
+
+describe('getLegalMoves', () => {
+  it('returns target squares for a piece', () => {
+    const { result } = renderHook(() => useChessGame())
+
+    const targets = result.current.getLegalMoves('e2')
+    expect(targets).toContain('e3')
+    expect(targets).toContain('e4')
+    expect(targets).toHaveLength(2)
+  })
+
+  it('returns empty array for an empty square', () => {
+    const { result } = renderHook(() => useChessGame())
+
+    const targets = result.current.getLegalMoves('e4')
+    expect(targets).toEqual([])
+  })
+
+  it('returns empty array for opponent piece', () => {
+    const { result } = renderHook(() => useChessGame())
+
+    const targets = result.current.getLegalMoves('e7')
+    expect(targets).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isPromotion
+// ---------------------------------------------------------------------------
+
+describe('isPromotion', () => {
+  it('returns true for a pawn reaching the last rank', () => {
+    const promotionFen = '8/4P3/8/8/8/8/8/4K2k w - - 0 1'
+    const { result } = renderHook(() => useChessGame({ startFen: promotionFen }))
+
+    expect(result.current.isPromotion('e7', 'e8')).toBe(true)
+  })
+
+  it('returns false for a normal pawn move', () => {
+    const { result } = renderHook(() => useChessGame())
+
+    expect(result.current.isPromotion('e2', 'e4')).toBe(false)
+  })
+
+  it('returns false for an invalid move', () => {
+    const { result } = renderHook(() => useChessGame())
+
+    expect(result.current.isPromotion('e2', 'e5')).toBe(false)
+  })
+})

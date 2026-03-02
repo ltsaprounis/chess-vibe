@@ -1,9 +1,11 @@
 import { Chessboard } from 'react-chessboard'
-import type { PieceDropHandlerArgs } from 'react-chessboard'
+import type { PieceDropHandlerArgs, PieceHandlerArgs, SquareHandlerArgs } from 'react-chessboard'
 
 export interface BoardProps {
   position: string
   onPieceDrop?: (args: PieceDropHandlerArgs) => boolean
+  onPieceClick?: (args: PieceHandlerArgs) => void
+  onSquareClick?: (args: SquareHandlerArgs) => void
   boardOrientation?: 'white' | 'black'
   boardWidth?: number
   arrowsEnabled?: boolean
@@ -13,6 +15,8 @@ export interface BoardProps {
 export function Board({
   position,
   onPieceDrop,
+  onPieceClick,
+  onSquareClick,
   boardOrientation = 'white',
   boardWidth,
   arrowsEnabled = false,
@@ -30,6 +34,8 @@ export function Board({
           allowDrawingArrows: arrowsEnabled,
           squareStyles,
           onPieceDrop,
+          onPieceClick,
+          onSquareClick,
         }}
       />
     </div>

@@ -41,7 +41,7 @@ export function MoveList({
   const pairs = groupMoves(moves)
 
   return (
-    <div className="overflow-y-auto rounded bg-gray-800 p-2 text-sm">
+    <div className="h-full overflow-y-auto rounded bg-gray-800 p-2 text-sm">
       {pairs.map((pair) => (
         <div key={pair.moveNumber} className="flex items-baseline gap-1 py-0.5">
           <span className="w-8 shrink-0 text-right text-gray-500">{pair.moveNumber}.</span>

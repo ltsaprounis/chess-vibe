@@ -21,9 +21,17 @@ let capturedBoardOnPieceDrop:
   | ((args: { piece: string; sourceSquare: string; targetSquare: string | null }) => boolean)
   | undefined
 
+let capturedBoardOnPieceClick:
+  | ((args: { isSparePiece: boolean; piece: { pieceType: string }; square: string }) => void)
+  | undefined
+
+let capturedBoardSquareStyles: Record<string, React.CSSProperties> | undefined
+
 vi.mock('react-chessboard', () => ({
   Chessboard: ({ options }: { options?: Record<string, unknown> }) => {
     capturedBoardOnPieceDrop = options?.onPieceDrop as typeof capturedBoardOnPieceDrop
+    capturedBoardOnPieceClick = options?.onPieceClick as typeof capturedBoardOnPieceClick
+    capturedBoardSquareStyles = options?.squareStyles as typeof capturedBoardSquareStyles
     return (
       <div
         data-testid="chessboard"
@@ -57,6 +65,8 @@ describe('PlayPage', () => {
     capturedOnMessage = undefined
     capturedOnOpen = undefined
     capturedBoardOnPieceDrop = undefined
+    capturedBoardOnPieceClick = undefined
+    capturedBoardSquareStyles = undefined
 
     vi.mocked(fetchEngines).mockResolvedValue(mockEngines)
 
@@ -392,5 +402,120 @@ describe('PlayPage', () => {
     expect(screen.queryByTestId('chessboard')).not.toBeInTheDocument()
     // Wait for async fetchEngines to settle
     await waitFor(() => expect(screen.getByLabelText('Engine')).toBeInTheDocument())
+  })
+
+  // -----------------------------------------------------------------------
+  // Pawn promotion
+  // -----------------------------------------------------------------------
+
+  it('shows promotion dialog when pawn reaches last rank', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Engine')).toBeInTheDocument()
+    })
+
+    // Set a promotion FEN via the FEN input
+    const fenInput = screen.getByLabelText(/starting position/i)
+    await user.clear(fenInput)
+    await user.type(fenInput, '8/4P3/8/8/8/8/8/4K2k w - - 0 1')
+
+    await user.click(screen.getByRole('button', { name: 'Start Game' }))
+    act(() => capturedOnOpen?.())
+    act(() => {
+      capturedOnMessage?.({
+        type: 'started',
+        game_id: 'game-promo',
+      })
+    })
+
+    // Attempt to promote the pawn
+    act(() => {
+      capturedBoardOnPieceDrop?.({
+        piece: 'wP',
+        sourceSquare: 'e7',
+        targetSquare: 'e8',
+      })
+    })
+
+    // Promotion dialog should appear
+    expect(screen.getByRole('dialog', { name: /promotion/i })).toBeInTheDocument()
+  })
+
+  it('sends promotion move with selected piece', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Engine')).toBeInTheDocument()
+    })
+
+    const fenInput = screen.getByLabelText(/starting position/i)
+    await user.clear(fenInput)
+    await user.type(fenInput, '8/4P3/8/8/8/8/8/4K2k w - - 0 1')
+
+    await user.click(screen.getByRole('button', { name: 'Start Game' }))
+    act(() => capturedOnOpen?.())
+    act(() => {
+      capturedOnMessage?.({
+        type: 'started',
+        game_id: 'game-promo',
+      })
+    })
+
+    // Trigger promotion
+    act(() => {
+      capturedBoardOnPieceDrop?.({
+        piece: 'wP',
+        sourceSquare: 'e7',
+        targetSquare: 'e8',
+      })
+    })
+
+    // Select knight promotion
+    await user.click(screen.getByRole('button', { name: 'Knight' }))
+
+    // Should send the knight promotion move
+    expect(mockSendMessage).toHaveBeenCalledWith({ type: 'move', move: 'e7e8n' })
+    // Dialog should close
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  // -----------------------------------------------------------------------
+  // Legal move highlighting
+  // -----------------------------------------------------------------------
+
+  it('highlights legal moves when a piece is clicked', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Engine')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: 'Start Game' }))
+    act(() => capturedOnOpen?.())
+    act(() => {
+      capturedOnMessage?.({
+        type: 'started',
+        game_id: 'game-highlight',
+      })
+    })
+
+    // Click on the e2 pawn
+    act(() => {
+      capturedBoardOnPieceClick?.({
+        isSparePiece: false,
+        piece: { pieceType: 'P' },
+        square: 'e2',
+      })
+    })
+
+    // squareStyles should contain the selected square and legal move targets
+    expect(capturedBoardSquareStyles).toBeDefined()
+    expect(capturedBoardSquareStyles!['e2']).toBeDefined()
+    expect(capturedBoardSquareStyles!['e3']).toBeDefined()
+    expect(capturedBoardSquareStyles!['e4']).toBeDefined()
   })
 })
