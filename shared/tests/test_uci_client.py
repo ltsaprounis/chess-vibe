@@ -201,6 +201,24 @@ class TestUCIClientStartStop:
             mock_exec.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_start_splits_command_with_arguments(self) -> None:
+        client = UCIClient("python -m random_engine")
+        mock_proc = _make_mock_process([])
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_proc
+            await client.start()
+            assert client.is_running
+            mock_exec.assert_called_once_with(
+                "python",
+                "-m",
+                "random_engine",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+    @pytest.mark.asyncio
     async def test_start_when_already_running(self) -> None:
         client = UCIClient("/fake/engine")
         mock_proc = _make_mock_process([])
