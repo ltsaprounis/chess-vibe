@@ -139,6 +139,7 @@ export function useChessGame(options?: UseChessGameOptions): UseChessGameReturn 
           isCapture: m.isCapture(),
         }))
       } catch {
+        // Invalid square strings intentionally return empty — no legal moves
         return []
       }
     },

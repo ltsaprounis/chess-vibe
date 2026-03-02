@@ -35,6 +35,18 @@ function buildWsUrl(): string {
   return `${protocol}//${window.location.host}/ws/play`
 }
 
+const SELECTED_SQUARE_STYLE: React.CSSProperties = {
+  backgroundColor: 'rgba(255, 255, 0, 0.4)',
+}
+
+const LEGAL_MOVE_DOT_STYLE: React.CSSProperties = {
+  background: 'radial-gradient(circle, rgba(0,0,0,0.2) 25%, transparent 25%)',
+}
+
+const CAPTURE_RING_STYLE: React.CSSProperties = {
+  background: 'radial-gradient(circle, transparent 60%, rgba(0,0,0,0.2) 60%)',
+}
+
 // ---------------------------------------------------------------------------
 // PlayPage
 // ---------------------------------------------------------------------------
@@ -232,17 +244,11 @@ export function PlayPage(): React.JSX.Element {
   // Build square styles for highlighting
   const squareStyles: Record<string, React.CSSProperties> = {}
   if (selectedSquare) {
-    squareStyles[selectedSquare] = { backgroundColor: 'rgba(255, 255, 0, 0.4)' }
+    squareStyles[selectedSquare] = SELECTED_SQUARE_STYLE
     for (const move of legalMoves) {
-      if (captureSquares.has(move.to)) {
-        squareStyles[move.to] = {
-          background: 'radial-gradient(circle, transparent 60%, rgba(0,0,0,0.2) 60%)',
-        }
-      } else {
-        squareStyles[move.to] = {
-          background: 'radial-gradient(circle, rgba(0,0,0,0.2) 25%, transparent 25%)',
-        }
-      }
+      squareStyles[move.to] = captureSquares.has(move.to)
+        ? CAPTURE_RING_STYLE
+        : LEGAL_MOVE_DOT_STYLE
     }
   }
 
