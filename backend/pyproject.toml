@@ -24,7 +24,7 @@ venvPath = "."
 venv = ".venv"
 
 [tool.uv.sources]
-shared = { path = "../shared" }
+shared = { path = "../shared", editable = true }
 
 [dependency-groups]
 dev = [
