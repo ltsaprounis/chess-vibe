@@ -43,3 +43,25 @@ class TestEnginesRoute:
         ):
             resp = client.get("/api/engines")
             assert resp.status_code == 500
+
+    def test_list_engines_uses_repo_root_for_registry(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """Verify load_registry is called with get_repo_root() / 'engines.json'."""
+        fake_root = Path("/fake/repo/root")
+        entries = [
+            EngineEntry(
+                id="e1",
+                name="E1",
+                dir="engines/e1",
+                build=None,
+                run="./run",
+            )
+        ]
+        with (
+            patch("backend.routes.engines.get_repo_root", return_value=fake_root),
+            patch("backend.routes.engines.load_registry", return_value=entries) as mock_load,
+        ):
+            resp = client.get("/api/engines")
+            assert resp.status_code == 200
+            mock_load.assert_called_once_with(fake_root / "engines.json")
