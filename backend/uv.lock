@@ -57,7 +57,7 @@ dev = [
 requires-dist = [
     { name = "fastapi" },
     { name = "python-multipart" },
-    { name = "shared", directory = "../shared" },
+    { name = "shared", editable = "../shared" },
     { name = "uvicorn", extras = ["standard"] },
 ]
 
@@ -510,7 +510,7 @@ wheels = [
 [[package]]
 name = "shared"
 version = "0.1.0"
-source = { directory = "../shared" }
+source = { editable = "../shared" }
 dependencies = [
     { name = "chess" },
 ]

@@ -214,7 +214,7 @@ wheels = [
 [[package]]
 name = "shared"
 version = "0.1.0"
-source = { directory = "../shared" }
+source = { editable = "../shared" }
 dependencies = [
     { name = "chess" },
 ]
@@ -249,7 +249,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "shared", directory = "../shared" }]
+requires-dist = [{ name = "shared", editable = "../shared" }]
 
 [package.metadata.requires-dev]
 dev = [
