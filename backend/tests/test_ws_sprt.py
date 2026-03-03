@@ -35,8 +35,6 @@ class TestSPRTWebSocket:
         mock_sprt_service: MagicMock,
     ) -> None:
         """Connecting to non-existent test_id returns error and closes."""
-        mock_sprt_service.subscribe = MagicMock(return_value=None)
-
         with ws_client.websocket_connect("/ws/sprt/nonexistent-id") as ws:
             data = ws.receive_json()
 
