@@ -176,6 +176,11 @@ async def play_websocket(websocket: WebSocket) -> None:
                 )
                 game_id = None
 
+            else:
+                await websocket.send_json(
+                    ErrorMessage(message=f"Unknown message type: {msg_type}").model_dump()
+                )
+
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except json.JSONDecodeError:
