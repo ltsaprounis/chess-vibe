@@ -20,12 +20,18 @@ from fastapi.testclient import TestClient
 
 pytestmark = pytest.mark.integration
 
+# Safety limit: random-engine games rarely exceed 200 half-moves; 300
+# prevents an infinite loop if game-over detection has a bug.
 _MAX_GAME_MOVES = 300
 
 
 def _pick_random_move(board: chess.Board) -> str:
-    """Pick a random legal move from the current board position."""
-    return random.choice(list(board.legal_moves)).uci()
+    """Pick a random legal move from the current board position.
+
+    Uses a fixed seed so games are reproducible across test runs.
+    """
+    rng = random.Random(len(board.move_stack))
+    return rng.choice(list(board.legal_moves)).uci()
 
 
 @pytest.fixture
@@ -39,7 +45,7 @@ def integration_client(
     the random-engine virtualenv has not been built.
     """
     app = create_app(data_dir=tmp_path)
-    return TestClient(app, raise_server_exceptions=False)
+    return TestClient(app)
 
 
 class TestPlayVsEngineIntegration:
