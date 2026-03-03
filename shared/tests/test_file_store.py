@@ -8,7 +8,11 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from shared.storage.file_store import FileGameRepository, FileSPRTTestRepository
+from shared.storage.file_store import (
+    FileGameRepository,
+    FileOpeningBookRepository,
+    FileSPRTTestRepository,
+)
 from shared.storage.models import (
     Game,
     GameFilter,
@@ -482,3 +486,92 @@ class TestConcurrentWriteSafety:
             loaded = repo.get_sprt_test(test.id)
             assert loaded is not None
             assert loaded.id == test.id
+
+
+# ---------------------------------------------------------------------------
+# FileOpeningBookRepository
+# ---------------------------------------------------------------------------
+
+
+class TestFileOpeningBookRepository:
+    """Tests for the opening book file-store implementation."""
+
+    def test_list_books_empty_dir(self, tmp_path: Path) -> None:
+        repo = FileOpeningBookRepository(tmp_path)
+        assert repo.list_books() == []
+
+    def test_list_books_no_dir(self, tmp_path: Path) -> None:
+        repo = FileOpeningBookRepository(tmp_path / "nonexistent")
+        assert repo.list_books() == []
+
+    def test_list_books_with_files(self, tmp_path: Path) -> None:
+        books_dir = tmp_path / "openings"
+        books_dir.mkdir()
+        (books_dir / "test.pgn").write_text("1. e4 e5 *")
+        (books_dir / "positions.epd").write_text("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")
+        (books_dir / "readme.txt").write_text("not a book")
+
+        repo = FileOpeningBookRepository(tmp_path)
+        books = repo.list_books()
+        assert len(books) == 2
+        names = {b.name for b in books}
+        assert "test" in names
+        assert "positions" in names
+
+    def test_list_books_sorted(self, tmp_path: Path) -> None:
+        books_dir = tmp_path / "openings"
+        books_dir.mkdir()
+        (books_dir / "b_book.pgn").write_text("data")
+        (books_dir / "a_book.epd").write_text("data")
+
+        repo = FileOpeningBookRepository(tmp_path)
+        books = repo.list_books()
+        assert books[0].name == "a_book"
+        assert books[1].name == "b_book"
+
+    def test_save_book(self, tmp_path: Path) -> None:
+        repo = FileOpeningBookRepository(tmp_path)
+        book = repo.save_book("my_openings.pgn", b"1. e4 e5 *", "pgn")
+
+        assert book.name == "my_openings.pgn"
+        assert book.format == "pgn"
+        assert book.id  # non-empty UUID
+        assert (tmp_path / "openings" / f"{book.id}.pgn").is_file()
+
+    def test_save_book_creates_directory(self, tmp_path: Path) -> None:
+        repo = FileOpeningBookRepository(tmp_path)
+        assert not (tmp_path / "openings").exists()
+        repo.save_book("test.epd", b"data", "epd")
+        assert (tmp_path / "openings").is_dir()
+
+    def test_save_book_content_preserved(self, tmp_path: Path) -> None:
+        repo = FileOpeningBookRepository(tmp_path)
+        content = b"1. e4 e5 2. Nf3 Nc6 *"
+        book = repo.save_book("games.pgn", content, "pgn")
+        saved = (tmp_path / "openings" / f"{book.id}.pgn").read_bytes()
+        assert saved == content
+
+    def test_get_book_path_found(self, tmp_path: Path) -> None:
+        repo = FileOpeningBookRepository(tmp_path)
+        book = repo.save_book("test.pgn", b"data", "pgn")
+        path = repo.get_book_path(book.id)
+        assert path is not None
+        assert path.is_file()
+
+    def test_get_book_path_not_found(self, tmp_path: Path) -> None:
+        repo = FileOpeningBookRepository(tmp_path)
+        assert repo.get_book_path("nonexistent") is None
+
+    def test_get_book_path_no_dir(self, tmp_path: Path) -> None:
+        repo = FileOpeningBookRepository(tmp_path / "nonexistent")
+        assert repo.get_book_path("anything") is None
+
+    def test_round_trip_save_and_list(self, tmp_path: Path) -> None:
+        repo = FileOpeningBookRepository(tmp_path)
+        repo.save_book("openings.pgn", b"1. d4 d5 *", "pgn")
+        repo.save_book("positions.epd", b"fen_data", "epd")
+
+        books = repo.list_books()
+        assert len(books) == 2
+        formats = {b.format for b in books}
+        assert formats == {"pgn", "epd"}

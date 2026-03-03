@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,13 +29,14 @@ from shared.storage.models import (
     GameFilter,
     GameResult,
     Move,
+    OpeningBook,
     SPRTOutcome,
     SPRTStatus,
     SPRTTest,
     SPRTTestFilter,
 )
 from shared.storage.pgn_export import export_game_to_pgn
-from shared.storage.repository import GameRepository, SPRTTestRepository
+from shared.storage.repository import GameRepository, OpeningBookRepository, SPRTTestRepository
 from shared.time_control import (
     DepthTimeControl,
     FixedTimeControl,
@@ -437,3 +439,67 @@ class FileSPRTTestRepository(SPRTTestRepository):
         content = json.dumps(_serialize_sprt_test(test), indent=2)
         _atomic_write(path, content)
         logger.debug("Updated SPRT test %s", test.id)
+
+
+# ---------------------------------------------------------------------------
+# FileOpeningBookRepository
+# ---------------------------------------------------------------------------
+
+
+class FileOpeningBookRepository(OpeningBookRepository):
+    """Flat-file implementation of :class:`OpeningBookRepository`.
+
+    Opening books are stored at ``data_dir/openings/{book-id}.{format}``.
+
+    Args:
+        data_dir: Root data directory (e.g. ``Path("data")``).
+    """
+
+    _SUPPORTED_EXTENSIONS = frozenset({".pgn", ".epd"})
+
+    def __init__(self, data_dir: Path) -> None:
+        """Initialise with the root data directory."""
+        self._books_dir = data_dir / "openings"
+
+    def list_books(self) -> list[OpeningBook]:
+        """List all available opening books."""
+        if not self._books_dir.is_dir():
+            return []
+
+        books: list[OpeningBook] = []
+        for path in sorted(self._books_dir.iterdir()):
+            if path.is_file() and path.suffix in self._SUPPORTED_EXTENSIONS:
+                books.append(
+                    OpeningBook(
+                        id=path.stem,
+                        name=path.stem,
+                        path=str(path),
+                        format=path.suffix.lstrip("."),
+                    )
+                )
+        return books
+
+    def save_book(self, name: str, content: bytes, format: str) -> OpeningBook:
+        """Persist an opening book file."""
+        self._books_dir.mkdir(parents=True, exist_ok=True)
+
+        book_id = str(uuid.uuid4())
+        dest = self._books_dir / f"{book_id}.{format}"
+        dest.write_bytes(content)
+
+        logger.debug("Saved opening book %s to %s", book_id, dest)
+        return OpeningBook(
+            id=book_id,
+            name=name,
+            path=str(dest),
+            format=format,
+        )
+
+    def get_book_path(self, book_id: str) -> Path | None:
+        """Retrieve the filesystem path for a book by its ID."""
+        if not self._books_dir.is_dir():
+            return None
+        for path in self._books_dir.iterdir():
+            if path.is_file() and path.stem == book_id:
+                return path
+        return None

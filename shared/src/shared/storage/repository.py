@@ -8,10 +8,12 @@ or SQL leak through these interfaces.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 from shared.storage.models import (
     Game,
     GameFilter,
+    OpeningBook,
     SPRTTest,
     SPRTTestFilter,
 )
@@ -106,4 +108,44 @@ class SPRTTestRepository(ABC):
 
         Raises:
             KeyError: If no test with the given ``id`` exists.
+        """
+
+
+class OpeningBookRepository(ABC):
+    """Persistence interface for opening book files.
+
+    Implementations may store books on the filesystem, in a database,
+    or any other backend.  Callers depend only on this ABC.
+    """
+
+    @abstractmethod
+    def list_books(self) -> list[OpeningBook]:
+        """List all available opening books.
+
+        Returns:
+            A list of opening book descriptors (may be empty).
+        """
+
+    @abstractmethod
+    def save_book(self, name: str, content: bytes, format: str) -> OpeningBook:
+        """Persist an opening book.
+
+        Args:
+            name: Original filename of the book.
+            content: Raw file content.
+            format: Book format (e.g. ``"pgn"``, ``"epd"``).
+
+        Returns:
+            Descriptor of the saved book.
+        """
+
+    @abstractmethod
+    def get_book_path(self, book_id: str) -> Path | None:
+        """Retrieve the filesystem path for a book by its ID.
+
+        Args:
+            book_id: The unique identifier of the book.
+
+        Returns:
+            The path to the book file, or ``None`` if not found.
         """

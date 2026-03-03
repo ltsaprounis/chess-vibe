@@ -49,7 +49,7 @@ class TestOpeningsRoutes:
         assert data["name"] == "test.pgn"
         assert data["format"] == "pgn"
 
-        # Verify file was saved
+        # Verify file was saved via repository (in openings dir)
         books_dir = data_dir / "openings"
         assert books_dir.is_dir()
         saved_files = list(books_dir.glob("*.pgn"))
