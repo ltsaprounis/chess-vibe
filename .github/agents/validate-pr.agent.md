@@ -6,6 +6,7 @@
 
 name: validate-pr
 description: Validates an existing pull request — code review, CI status, and frontend E2E validation via Playwright
+tools: ["execute", "read", "search", "github/*", "playwright/*"]
 ---
 
 # Validate Agent
