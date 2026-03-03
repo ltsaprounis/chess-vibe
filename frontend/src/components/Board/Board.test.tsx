@@ -1,16 +1,23 @@
 import { render, screen } from '@testing-library/react'
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Board } from './Board'
 
+let capturedOptions: Record<string, unknown> | undefined
+
 vi.mock('react-chessboard', () => ({
-  Chessboard: ({ options }: { options?: Record<string, unknown> }) => (
-    <div data-testid="chessboard" data-options={JSON.stringify(options)} />
-  ),
+  Chessboard: ({ options }: { options?: Record<string, unknown> }) => {
+    capturedOptions = options
+    return <div data-testid="chessboard" data-options={JSON.stringify(options)} />
+  },
 }))
 
 const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 
 describe('Board', () => {
+  beforeEach(() => {
+    capturedOptions = undefined
+  })
+
   it('renders the chessboard with default props', () => {
     render(<Board position={STARTING_FEN} />)
     expect(screen.getByTestId('chessboard')).toBeInTheDocument()
@@ -79,5 +86,27 @@ describe('Board', () => {
     const board = screen.getByTestId('chessboard')
     const container = board.parentElement
     expect(container).toHaveStyle({ width: '400px' })
+  })
+
+  it('passes onSquareClick callback to the chessboard', () => {
+    const onSquareClick = vi.fn()
+    render(<Board position={STARTING_FEN} onSquareClick={onSquareClick} />)
+
+    expect(capturedOptions?.onSquareClick).toBeDefined()
+
+    // Simulate calling the onSquareClick handler
+    const handler = capturedOptions?.onSquareClick as (args: {
+      piece: unknown
+      square: string
+    }) => void
+    handler({ piece: null, square: 'e4' })
+
+    expect(onSquareClick).toHaveBeenCalledWith('e4')
+  })
+
+  it('does not pass onSquareClick when not provided', () => {
+    render(<Board position={STARTING_FEN} />)
+
+    expect(capturedOptions?.onSquareClick).toBeUndefined()
   })
 })
