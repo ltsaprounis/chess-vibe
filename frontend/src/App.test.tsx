@@ -1,27 +1,35 @@
-import { render, screen } from '@testing-library/react'
-import { describe, it, expect } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
+import { describe, it, expect, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { App } from './App'
 
+vi.mock('./services/api', () => ({
+  fetchEngines: vi.fn().mockResolvedValue([]),
+}))
+
 describe('App', () => {
-  it('renders the Play page by default', () => {
+  it('renders the Play page by default', async () => {
     render(
       <MemoryRouter initialEntries={['/']}>
         <App />
       </MemoryRouter>,
     )
-    expect(screen.getByRole('heading', { name: 'Play' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Play' })).toBeInTheDocument()
+    })
   })
 })
 
 describe('Routing', () => {
-  it('renders Play page at /', () => {
+  it('renders Play page at /', async () => {
     render(
       <MemoryRouter initialEntries={['/']}>
         <App />
       </MemoryRouter>,
     )
-    expect(screen.getByRole('heading', { name: 'Play' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Play' })).toBeInTheDocument()
+    })
   })
 
   it('renders SPRT Tests page at /sprt', () => {
