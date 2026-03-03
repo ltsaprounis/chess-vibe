@@ -6,7 +6,7 @@
 
 name: validate-pr
 description: Validates an existing pull request — code review, CI status, and frontend E2E validation via Playwright
-tools: ["execute", "read", "search", "github/*", "playwright/*"]
+tools: ["execute", "read", "search", "github/*", "github-rw/*", "playwright/*"]
 ---
 
 # Validate Agent
@@ -101,10 +101,10 @@ For each tagged issue:
    ```
 
    If server startup fails, record the failure reason (command, exit code, stderr) in the report as ❌ FAIL — **do not skip E2E silently**. Continue with remaining validation steps.
-7. **Submit review** — Submit a GitHub review with a **concise summary** (pass/fail counts, key findings) and actionable **line comments** on specific issues. Do not put the full report table in the review body.
-   - **Approve** if all criteria pass and code quality is good.
-   - **Request changes** if any blocking issue exists.
-8. **Post full validation report as a PR comment** — Post the complete structured report as a **comment on the PR** using the GitHub MCP server. This is where the detailed table lives, ensuring all reviewers can see it in the PR timeline.
+7. **Submit review** — Use the `github-rw/pull_request_review_write` tool to submit a GitHub review with a **concise summary** (pass/fail counts, key findings) and actionable **line comments** on specific issues (via `github-rw/add_comment_to_pending_review`). Do not put the full report table in the review body.
+   - **Approve** (`event: "APPROVE"`) if all criteria pass and code quality is good.
+   - **Request changes** (`event: "REQUEST_CHANGES"`) if any blocking issue exists.
+8. **Post full validation report as a PR comment** — Use the `github-rw/add_issue_comment` tool to post the complete structured report as a **comment on the PR**. This is where the detailed table lives, ensuring all reviewers can see it in the PR timeline.
    - If a previous validation comment from this agent already exists on the PR, **update it** instead of creating a duplicate.
 
    Use this template:
@@ -153,5 +153,6 @@ This rule applies globally to **all** validation steps (local CI, code review, E
 
 ### Tools
 
-- **GitHub MCP server** — Read PRs, read file contents, review diffs, check CI status, submit reviews with comments.
-- **Playwright MCP server** — Browser automation for frontend E2E validation against deployed previews.
+- **GitHub MCP server (`github/`)** — Read-only: read PRs, file contents, diffs, CI status, issues.
+- **GitHub MCP server (`github-rw/`)** — Write: submit PR reviews (`pull_request_review_write`), add inline review comments (`add_comment_to_pending_review`), post PR comments (`add_issue_comment`), reply to comments (`add_reply_to_pull_request_comment`).
+- **Playwright MCP server (`playwright/`)** — Browser automation for frontend E2E validation against local dev servers.
