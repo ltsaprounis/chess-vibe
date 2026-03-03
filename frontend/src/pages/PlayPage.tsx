@@ -7,6 +7,8 @@ import { Board } from '../components/Board/Board'
 import { EvalBar } from '../components/EvalBar/EvalBar'
 import { MoveList } from '../components/MoveList/MoveList'
 import type { MoveItem } from '../components/MoveList/MoveList'
+import { PromotionDialog } from '../components/Board/PromotionDialog'
+import type { PromotionPiece } from '../components/Board/PromotionDialog'
 import type { PieceDropHandlerArgs } from 'react-chessboard'
 
 // ---------------------------------------------------------------------------
@@ -66,10 +68,16 @@ export function PlayPage(): React.JSX.Element {
   const [latestEval, setLatestEval] = useState<{ scoreCp?: number; scoreMate?: number }>({})
 
   // Chess game state
-  const { fen, moves, turn, makeMove, addEngineMove, reset, getLegalMoves } = useChessGame()
+  const { fen, moves, turn, makeMove, addEngineMove, reset, getLegalMoves, isPromotionMove } =
+    useChessGame()
 
   // Selected piece state for click-to-move
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null)
+
+  // Pending promotion state
+  const [pendingPromotion, setPendingPromotion] = useState<{ from: string; to: string } | null>(
+    null,
+  )
 
   // Ref for start params (sent when WS opens)
   const startParamsRef = useRef<Record<string, unknown> | null>(null)
@@ -136,6 +144,7 @@ export function PlayPage(): React.JSX.Element {
     setGameId(null)
     setLatestEval({})
     setSelectedSquare(null)
+    setPendingPromotion(null)
     reset(customFen || undefined)
 
     startParamsRef.current = {
@@ -155,6 +164,7 @@ export function PlayPage(): React.JSX.Element {
     setError(null)
     setLatestEval({})
     setSelectedSquare(null)
+    setPendingPromotion(null)
     reset()
   }
 
@@ -168,6 +178,13 @@ export function PlayPage(): React.JSX.Element {
         (playerColor === 'white' && turn === 'w') || (playerColor === 'black' && turn === 'b')
       if (!isPlayerTurn) return false
 
+      // Check if this is a promotion move
+      if (isPromotionMove(sourceSquare, targetSquare)) {
+        setPendingPromotion({ from: sourceSquare, to: targetSquare })
+        setSelectedSquare(null)
+        return false
+      }
+
       const uci = `${sourceSquare}${targetSquare}`
       if (makeMove(uci)) {
         sendMessage({ type: 'move', move: uci })
@@ -175,17 +192,9 @@ export function PlayPage(): React.JSX.Element {
         return true
       }
 
-      // Try queen promotion
-      const promoUci = `${uci}q`
-      if (makeMove(promoUci)) {
-        sendMessage({ type: 'move', move: promoUci })
-        setSelectedSquare(null)
-        return true
-      }
-
       return false
     },
-    [playerColor, turn, makeMove, sendMessage],
+    [playerColor, turn, makeMove, sendMessage, isPromotionMove],
   )
 
   // Handle square click for click-to-move
@@ -204,16 +213,16 @@ export function PlayPage(): React.JSX.Element {
         const isLegalTarget = currentLegalMoves.some((m) => m.to === square)
 
         if (isLegalTarget) {
-          const uci = `${selectedSquare}${square}`
-          if (makeMove(uci)) {
-            sendMessage({ type: 'move', move: uci })
+          // Check if this is a promotion move
+          if (isPromotionMove(selectedSquare, square)) {
+            setPendingPromotion({ from: selectedSquare, to: square })
             setSelectedSquare(null)
             return
           }
-          // Try queen promotion
-          const promoUci = `${uci}q`
-          if (makeMove(promoUci)) {
-            sendMessage({ type: 'move', move: promoUci })
+
+          const uci = `${selectedSquare}${square}`
+          if (makeMove(uci)) {
+            sendMessage({ type: 'move', move: uci })
             setSelectedSquare(null)
             return
           }
@@ -234,8 +243,26 @@ export function PlayPage(): React.JSX.Element {
         setSelectedSquare(null)
       }
     },
-    [playerColor, turn, selectedSquare, makeMove, sendMessage, getLegalMoves],
+    [playerColor, turn, selectedSquare, makeMove, sendMessage, getLegalMoves, isPromotionMove],
   )
+
+  // Handle promotion piece selection
+  const handlePromotionSelect = useCallback(
+    (piece: PromotionPiece): void => {
+      if (!pendingPromotion) return
+      const uci = `${pendingPromotion.from}${pendingPromotion.to}${piece}`
+      if (makeMove(uci)) {
+        sendMessage({ type: 'move', move: uci })
+      }
+      setPendingPromotion(null)
+    },
+    [pendingPromotion, makeMove, sendMessage],
+  )
+
+  // Handle promotion cancel
+  const handlePromotionCancel = useCallback((): void => {
+    setPendingPromotion(null)
+  }, [])
 
   // Compute legal moves for the selected square (for highlighting)
   const legalMoves = selectedSquare ? getLegalMoves(selectedSquare) : []
@@ -379,13 +406,22 @@ export function PlayPage(): React.JSX.Element {
             </div>
 
             {/* Board */}
-            <Board
-              position={fen}
-              onPieceDrop={handlePieceDrop}
-              onSquareClick={handleSquareClick}
-              boardOrientation={playerColor}
-              squareStyles={squareStyles}
-            />
+            <div className="relative">
+              <Board
+                position={fen}
+                onPieceDrop={handlePieceDrop}
+                onSquareClick={handleSquareClick}
+                boardOrientation={playerColor}
+                squareStyles={squareStyles}
+              />
+              {pendingPromotion && (
+                <PromotionDialog
+                  color={playerColor}
+                  onSelect={handlePromotionSelect}
+                  onCancel={handlePromotionCancel}
+                />
+              )}
+            </div>
 
             {/* Move list */}
             <div className="h-[600px] w-64 overflow-hidden">

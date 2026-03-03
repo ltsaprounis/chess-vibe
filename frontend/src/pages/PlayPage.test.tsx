@@ -604,4 +604,184 @@ describe('PlayPage', () => {
     // Selection should be cleared
     expect(capturedSquareStyles).toEqual({})
   })
+
+  // -----------------------------------------------------------------------
+  // Pawn promotion
+  // -----------------------------------------------------------------------
+
+  // FEN: white pawn on e7 about to promote, black king on a8, white king on e1
+  const PROMO_FEN = 'k7/4P3/8/8/8/8/8/4K3 w - - 0 1'
+
+  async function startGameWithFen(
+    user: ReturnType<typeof userEvent.setup>,
+    fen: string,
+  ): Promise<void> {
+    await waitFor(() => {
+      expect(screen.getByLabelText('Engine')).toBeInTheDocument()
+    })
+
+    // Set custom FEN before starting game
+    await user.clear(screen.getByLabelText(/starting position/i))
+    await user.type(screen.getByLabelText(/starting position/i), fen)
+
+    await user.click(screen.getByRole('button', { name: 'Start Game' }))
+    act(() => capturedOnOpen?.())
+    act(() => {
+      capturedOnMessage?.({
+        type: 'started',
+        game_id: 'game-promo',
+      })
+    })
+  }
+
+  it('shows promotion dialog when pawn reaches last rank via drag-and-drop', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGameWithFen(user, PROMO_FEN)
+
+    // Drag pawn from e7 to e8 — should trigger promotion dialog
+    act(() => {
+      capturedBoardOnPieceDrop?.({
+        piece: 'wP',
+        sourceSquare: 'e7',
+        targetSquare: 'e8',
+      })
+    })
+
+    expect(screen.getByRole('dialog', { name: 'Choose promotion piece' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Queen' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rook' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Bishop' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Knight' })).toBeInTheDocument()
+  })
+
+  it('completes promotion with selected piece (queen) via drag-and-drop', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGameWithFen(user, PROMO_FEN)
+
+    act(() => {
+      capturedBoardOnPieceDrop?.({
+        piece: 'wP',
+        sourceSquare: 'e7',
+        targetSquare: 'e8',
+      })
+    })
+
+    // Select queen
+    await user.click(screen.getByRole('button', { name: 'Queen' }))
+
+    expect(mockSendMessage).toHaveBeenCalledWith({ type: 'move', move: 'e7e8q' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('completes promotion with knight via drag-and-drop', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGameWithFen(user, PROMO_FEN)
+
+    act(() => {
+      capturedBoardOnPieceDrop?.({
+        piece: 'wP',
+        sourceSquare: 'e7',
+        targetSquare: 'e8',
+      })
+    })
+
+    // Select knight
+    await user.click(screen.getByRole('button', { name: 'Knight' }))
+
+    expect(mockSendMessage).toHaveBeenCalledWith({ type: 'move', move: 'e7e8n' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('cancels promotion when backdrop is clicked', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGameWithFen(user, PROMO_FEN)
+
+    act(() => {
+      capturedBoardOnPieceDrop?.({
+        piece: 'wP',
+        sourceSquare: 'e7',
+        targetSquare: 'e8',
+      })
+    })
+
+    // Cancel by clicking backdrop
+    await user.click(screen.getByTestId('promotion-backdrop'))
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    // No move should be sent for the promotion
+    expect(mockSendMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ move: expect.stringContaining('e7e8') }),
+    )
+  })
+
+  it('shows promotion dialog when pawn reaches last rank via click-to-move', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGameWithFen(user, PROMO_FEN)
+
+    // Click-to-move: select pawn on e7, then click e8
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e7' })
+    })
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e8' })
+    })
+
+    expect(screen.getByRole('dialog', { name: 'Choose promotion piece' })).toBeInTheDocument()
+  })
+
+  it('completes promotion with rook via click-to-move', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGameWithFen(user, PROMO_FEN)
+
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e7' })
+    })
+    act(() => {
+      capturedBoardOnSquareClick?.({ piece: null, square: 'e8' })
+    })
+
+    await user.click(screen.getByRole('button', { name: 'Rook' }))
+
+    expect(mockSendMessage).toHaveBeenCalledWith({ type: 'move', move: 'e7e8r' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('does not show promotion dialog for engine promotion moves', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Engine')).toBeInTheDocument()
+    })
+
+    // Play as black so engine moves as white
+    await user.click(screen.getByText('Black'))
+    await user.clear(screen.getByLabelText(/starting position/i))
+    await user.type(screen.getByLabelText(/starting position/i), PROMO_FEN)
+    await user.click(screen.getByRole('button', { name: 'Start Game' }))
+    act(() => capturedOnOpen?.())
+    act(() => {
+      capturedOnMessage?.({
+        type: 'started',
+        game_id: 'game-engine-promo',
+      })
+    })
+
+    // Engine (white) promotes the pawn
+    act(() => {
+      capturedOnMessage?.({
+        type: 'engine_move',
+        move: 'e7e8q',
+      })
+    })
+
+    // No promotion dialog should appear for engine moves
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
 })
