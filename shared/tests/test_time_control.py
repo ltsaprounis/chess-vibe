@@ -7,6 +7,7 @@ from shared.time_control import (
     IncrementTimeControl,
     NodesTimeControl,
     TimeControlType,
+    parse_time_control,
 )
 
 
@@ -162,3 +163,40 @@ class TestNodesTimeControl:
         tc = NodesTimeControl(nodes=100000)
         with pytest.raises(AttributeError):
             tc.nodes = 200000  # type: ignore[misc]
+
+
+class TestParseTimeControl:
+    """Tests for parse_time_control."""
+
+    def test_movetime(self) -> None:
+        tc = parse_time_control("movetime=1000")
+        assert isinstance(tc, FixedTimeControl)
+        assert tc.movetime_ms == 1000
+
+    def test_depth(self) -> None:
+        tc = parse_time_control("depth=10")
+        assert isinstance(tc, DepthTimeControl)
+        assert tc.depth == 10
+
+    def test_nodes(self) -> None:
+        tc = parse_time_control("nodes=50000")
+        assert isinstance(tc, NodesTimeControl)
+        assert tc.nodes == 50000
+
+    def test_increment(self) -> None:
+        tc = parse_time_control("wtime=60000,btime=60000,winc=1000,binc=1000")
+        assert isinstance(tc, IncrementTimeControl)
+        assert tc.wtime_ms == 60000
+        assert tc.btime_ms == 60000
+        assert tc.winc_ms == 1000
+        assert tc.binc_ms == 1000
+
+    def test_increment_defaults(self) -> None:
+        tc = parse_time_control("wtime=60000,btime=60000")
+        assert isinstance(tc, IncrementTimeControl)
+        assert tc.winc_ms == 0
+        assert tc.binc_ms == 0
+
+    def test_unknown_format_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown time control"):
+            parse_time_control("invalid=abc")

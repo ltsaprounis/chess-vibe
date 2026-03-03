@@ -11,8 +11,8 @@ from shared.time_control import (
     DepthTimeControl,
     FixedTimeControl,
     IncrementTimeControl,
-    NodesTimeControl,
     TimeControl,
+    parse_time_control,
 )
 
 from backend.models import (
@@ -27,11 +27,8 @@ from backend.models import (
 def time_control_from_string(tc_str: str) -> TimeControl:
     """Parse a time control string into a domain :class:`TimeControl`.
 
-    Supported formats mirror the SPRT runner CLI:
-        - ``movetime=1000``
-        - ``depth=10``
-        - ``nodes=50000``
-        - ``wtime=60000,btime=60000,winc=1000,binc=1000``
+    Thin wrapper around :func:`shared.time_control.parse_time_control` kept
+    for backward-compatibility with existing call-sites.
 
     Args:
         tc_str: Time control string.
@@ -42,23 +39,7 @@ def time_control_from_string(tc_str: str) -> TimeControl:
     Raises:
         ValueError: If the format is unrecognised.
     """
-    parts = dict(part.split("=", 1) for part in tc_str.split(","))
-
-    if "movetime" in parts:
-        return FixedTimeControl(movetime_ms=int(parts["movetime"]))
-    if "depth" in parts:
-        return DepthTimeControl(depth=int(parts["depth"]))
-    if "nodes" in parts:
-        return NodesTimeControl(nodes=int(parts["nodes"]))
-    if "wtime" in parts and "btime" in parts:
-        return IncrementTimeControl(
-            wtime_ms=int(parts["wtime"]),
-            btime_ms=int(parts["btime"]),
-            winc_ms=int(parts.get("winc", "0")),
-            binc_ms=int(parts.get("binc", "0")),
-        )
-
-    raise ValueError(f"Unknown time control format: {tc_str!r}")
+    return parse_time_control(tc_str)
 
 
 def time_control_to_response(tc: TimeControl) -> TimeControlResponse:

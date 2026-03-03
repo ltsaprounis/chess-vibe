@@ -25,6 +25,7 @@ from shared.time_control import (
     NodesTimeControl,
     TimeControl,
     TimeControlType,
+    parse_time_control,
 )
 from shared.uci_client import (
     BestMove,
@@ -75,4 +76,5 @@ __all__ = [
     "load_registry",
     "parse_bestmove",
     "parse_info_line",
+    "parse_time_control",
 ]

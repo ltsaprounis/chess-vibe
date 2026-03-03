@@ -161,3 +161,40 @@ class NodesTimeControl:
 
 
 TimeControl = FixedTimeControl | IncrementTimeControl | DepthTimeControl | NodesTimeControl
+
+
+def parse_time_control(tc_str: str) -> TimeControl:
+    """Parse a time control specification string.
+
+    Supported formats:
+        - ``movetime=1000`` — Fixed time per move in ms.
+        - ``depth=10`` — Search to fixed depth.
+        - ``nodes=50000`` — Search fixed number of nodes.
+        - ``wtime=60000,btime=60000,winc=1000,binc=1000`` — Increment.
+
+    Args:
+        tc_str: Time control string.
+
+    Returns:
+        Parsed :class:`TimeControl`.
+
+    Raises:
+        ValueError: If the format is unrecognised.
+    """
+    parts = dict(part.split("=", 1) for part in tc_str.split(","))
+
+    if "movetime" in parts:
+        return FixedTimeControl(movetime_ms=int(parts["movetime"]))
+    if "depth" in parts:
+        return DepthTimeControl(depth=int(parts["depth"]))
+    if "nodes" in parts:
+        return NodesTimeControl(nodes=int(parts["nodes"]))
+    if "wtime" in parts and "btime" in parts:
+        return IncrementTimeControl(
+            wtime_ms=int(parts["wtime"]),
+            btime_ms=int(parts["btime"]),
+            winc_ms=int(parts.get("winc", "0")),
+            binc_ms=int(parts.get("binc", "0")),
+        )
+
+    raise ValueError(f"Unknown time control format: {tc_str!r}")

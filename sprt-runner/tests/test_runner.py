@@ -7,7 +7,7 @@ import multiprocessing
 
 import pytest
 from shared.storage.models import GameResult
-from shared.time_control import DepthTimeControl, FixedTimeControl
+from shared.time_control import DepthTimeControl, FixedTimeControl, parse_time_control
 from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig
 from sprt_runner.runner import (
@@ -18,7 +18,6 @@ from sprt_runner.runner import (
     format_error_message,
     format_game_result_message,
     format_progress_message,
-    parse_time_control,
     worker_entry,
 )
 
