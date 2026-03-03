@@ -1,6 +1,10 @@
 """Persistence layer for chess-vibe: domain models, repository ABCs, and storage implementations."""
 
-from shared.storage.file_store import FileGameRepository, FileSPRTTestRepository
+from shared.storage.file_store import (
+    FileGameRepository,
+    FileOpeningBookRepository,
+    FileSPRTTestRepository,
+)
 from shared.storage.models import (
     Engine,
     Game,
@@ -14,11 +18,12 @@ from shared.storage.models import (
     SPRTTestFilter,
 )
 from shared.storage.pgn_export import export_game_to_pgn
-from shared.storage.repository import GameRepository, SPRTTestRepository
+from shared.storage.repository import GameRepository, OpeningBookRepository, SPRTTestRepository
 
 __all__ = [
     "Engine",
     "FileGameRepository",
+    "FileOpeningBookRepository",
     "FileSPRTTestRepository",
     "Game",
     "GameFilter",
@@ -26,6 +31,7 @@ __all__ = [
     "GameResult",
     "Move",
     "OpeningBook",
+    "OpeningBookRepository",
     "SPRTOutcome",
     "SPRTStatus",
     "SPRTTest",

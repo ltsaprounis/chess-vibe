@@ -14,7 +14,11 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from shared.storage.file_store import FileGameRepository, FileSPRTTestRepository
+from shared.storage.file_store import (
+    FileGameRepository,
+    FileOpeningBookRepository,
+    FileSPRTTestRepository,
+)
 
 from backend.routes import engines, games, openings, sprt
 from backend.services.engine_pool import EnginePool
@@ -96,6 +100,7 @@ def create_app(
 
     game_repo = FileGameRepository(effective_data_dir)
     sprt_repo = FileSPRTTestRepository(effective_data_dir)
+    book_repo = FileOpeningBookRepository(effective_data_dir)
     engine_pool = EnginePool()
     game_manager = GameManager(engine_pool, game_repo)
     sprt_service = SPRTService(
@@ -104,9 +109,9 @@ def create_app(
     )
 
     # Store on app.state for access in route handlers
-    app.state.data_dir = effective_data_dir
     app.state.game_repo = game_repo
     app.state.sprt_repo = sprt_repo
+    app.state.book_repo = book_repo
     app.state.engine_pool = engine_pool
     app.state.game_manager = game_manager
     app.state.sprt_service = sprt_service
