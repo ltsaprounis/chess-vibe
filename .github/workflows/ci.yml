@@ -98,10 +98,43 @@ jobs:
       - name: Install dependencies
         run: cd ${{ matrix.component }} && uv sync --dev
 
-      - name: Run tests
+      - name: Run unit tests
         run: |
           cd ${{ matrix.component }}
-          uv run pytest --cov=src --cov-report=term-missing || [ $? -eq 5 ]
+          uv run pytest -m "not integration" --cov=src --cov-report=term-missing || [ $? -eq 5 ]
+
+  test-integration:
+    name: Integration Test (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - shared
+          - sprt-runner
+          - backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.13'
+
+      - name: Build random-engine venv
+        run: |
+          cd engines/random-engine
+          uv venv .venv --python 3.13
+          uv pip install --python .venv/bin/python -e .
+
+      - name: Install dependencies
+        run: cd ${{ matrix.component }} && uv sync --dev
+
+      - name: Run integration tests
+        run: |
+          cd ${{ matrix.component }}
+          uv run pytest -m integration --cov=src --cov-report=term-missing || [ $? -eq 5 ]
 
   test-frontend:
     name: Test (frontend)

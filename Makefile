@@ -5,7 +5,7 @@
 PYTHON_COMPONENTS := shared sprt-runner backend
 PYTHON_VERSION    := 3.13
 
-.PHONY: help setup test lint dev dev-backend dev-frontend clean
+.PHONY: help setup test test-integration test-all lint dev dev-backend dev-frontend clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | \
@@ -30,7 +30,30 @@ setup: ## Install all dependencies (Python venvs + npm)
 
 # ── Test ────────────────────────────────────────────────────────────
 
-test: ## Run all test suites across all components
+test: ## Run unit tests only (excludes integration tests)
+	@for component in $(PYTHON_COMPONENTS); do \
+		echo "==> Testing $$component ..."; \
+		cd $(CURDIR)/$$component && uv run pytest -m "not integration" --cov=src --cov-report=term-missing \
+			|| { ec=$$?; [ "$$ec" -eq 5 ] || exit "$$ec"; }; \
+		echo "    ✓ $$component done"; \
+	done
+	@echo "==> Testing frontend ..."
+	@cd $(CURDIR)/frontend && npm run test:ci
+	@echo "    ✓ frontend done"
+	@echo ""
+	@echo "All unit tests passed!"
+
+test-integration: ## Run integration tests only
+	@for component in $(PYTHON_COMPONENTS); do \
+		echo "==> Integration testing $$component ..."; \
+		cd $(CURDIR)/$$component && uv run pytest -m integration --cov=src --cov-report=term-missing \
+			|| { ec=$$?; [ "$$ec" -eq 5 ] || exit "$$ec"; }; \
+		echo "    ✓ $$component done"; \
+	done
+	@echo ""
+	@echo "All integration tests passed!"
+
+test-all: ## Run all tests (unit + integration)
 	@for component in $(PYTHON_COMPONENTS); do \
 		echo "==> Testing $$component ..."; \
 		cd $(CURDIR)/$$component && uv run pytest --cov=src --cov-report=term-missing \
