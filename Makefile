@@ -37,6 +37,10 @@ test: ## Run unit tests only (excludes integration tests)
 			|| { ec=$$?; [ "$$ec" -eq 5 ] || exit "$$ec"; }; \
 		echo "    ✓ $$component done"; \
 	done
+	@echo "==> Testing engines/random-engine ..."
+	@cd $(CURDIR)/engines/random-engine && uv run pytest -m "not integration" --cov=src --cov-report=term-missing \
+		|| { ec=$$?; [ "$$ec" -eq 5 ] || exit "$$ec"; }
+	@echo "    ✓ engines/random-engine done"
 	@echo "==> Testing frontend ..."
 	@cd $(CURDIR)/frontend && npm run test:ci
 	@echo "    ✓ frontend done"
@@ -50,6 +54,10 @@ test-integration: ## Run integration tests only
 			|| { ec=$$?; [ "$$ec" -eq 5 ] || exit "$$ec"; }; \
 		echo "    ✓ $$component done"; \
 	done
+	@echo "==> Integration testing engines/random-engine ..."
+	@cd $(CURDIR)/engines/random-engine && uv run pytest -m integration --cov=src --cov-report=term-missing \
+		|| { ec=$$?; [ "$$ec" -eq 5 ] || exit "$$ec"; }
+	@echo "    ✓ engines/random-engine done"
 	@echo ""
 	@echo "All integration tests passed!"
 
@@ -60,6 +68,10 @@ test-all: ## Run all tests (unit + integration)
 			|| { ec=$$?; [ "$$ec" -eq 5 ] || exit "$$ec"; }; \
 		echo "    ✓ $$component done"; \
 	done
+	@echo "==> Testing engines/random-engine ..."
+	@cd $(CURDIR)/engines/random-engine && uv run pytest --cov=src --cov-report=term-missing \
+		|| { ec=$$?; [ "$$ec" -eq 5 ] || exit "$$ec"; }
+	@echo "    ✓ engines/random-engine done"
 	@echo "==> Testing frontend ..."
 	@cd $(CURDIR)/frontend && npm run test:ci
 	@echo "    ✓ frontend done"
@@ -77,6 +89,8 @@ lint: ## Run all linters, formatters, and type-checkers
 		echo "==> Pyright ($$component) ..."; \
 		cd $(CURDIR)/$$component && uv run pyright; \
 	done
+	@echo "==> Pyright (engines/random-engine) ..."
+	@cd $(CURDIR)/engines/random-engine && uv run pyright
 	@echo "==> ESLint (frontend) ..."
 	@cd $(CURDIR)/frontend && npx eslint src/
 	@echo "==> Prettier check (frontend) ..."
@@ -99,8 +113,6 @@ dev: ## Start backend + frontend (use Ctrl-C to stop both)
 	@cleanup() { \
 		kill $$BACKEND_PID $$FRONTEND_PID 2>/dev/null; \
 		wait $$BACKEND_PID $$FRONTEND_PID 2>/dev/null; \
-		fuser -k 8000/tcp 2>/dev/null; \
-		fuser -k 5173/tcp 2>/dev/null; \
 	}; \
 	trap cleanup INT TERM EXIT; \
 	cd $(CURDIR)/backend && uv run uvicorn backend.main:create_app \
@@ -117,5 +129,7 @@ clean: ## Remove all venvs and node_modules
 		echo "==> Cleaning $$component ..."; \
 		rm -rf $(CURDIR)/$$component/.venv; \
 	done
+	@echo "==> Cleaning engines/random-engine ..."
+	@rm -rf $(CURDIR)/engines/random-engine/.venv
 	@rm -rf $(CURDIR)/frontend/node_modules
 	@echo "Clean."
