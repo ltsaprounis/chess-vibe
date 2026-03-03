@@ -20,6 +20,7 @@ import pytest
 from shared.time_control import DepthTimeControl
 from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig
+from sprt_runner.openings import load_openings, make_opening_pairs
 from sprt_runner.runner import (
     WorkerResult,
     WorkerTask,
@@ -233,7 +234,9 @@ class TestSPRTStatisticsIntegration:
             assert result.error is None
             assert result.result is not None
 
-            # Accumulate from test engine perspective (test == base here)
+            # Accumulate from test engine's perspective.
+            # Both engines are random-engine so the perspective is arbitrary,
+            # but the bookkeeping must be consistent for SPRT calculation.
             if result.swap_colors:
                 if result.result.value == "1-0":
                     wins += 1
@@ -296,8 +299,6 @@ class TestOpeningBookIntegration:
             "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1\n"
             "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1\n"
         )
-
-        from sprt_runner.openings import load_openings, make_opening_pairs
 
         fens = load_openings(epd_file)
         assert len(fens) == 2
