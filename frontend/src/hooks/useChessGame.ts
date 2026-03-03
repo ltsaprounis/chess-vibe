@@ -44,6 +44,7 @@ export interface UseChessGameReturn {
   addEngineMove: (uci: string, evalData?: EvalData) => boolean
   reset: (fen?: string) => void
   getLegalMoves: (square: string) => LegalMove[]
+  isPromotionMove: (from: string, to: string) => boolean
   pgn: string
 }
 
@@ -146,6 +147,21 @@ export function useChessGame(options?: UseChessGameOptions): UseChessGameReturn 
     [chess],
   )
 
+  const isPromotionMove = useCallback(
+    (from: string, to: string): boolean => {
+      try {
+        const verboseMoves = chess.moves({
+          square: from as Square,
+          verbose: true,
+        })
+        return verboseMoves.some((m) => m.to === to && m.promotion)
+      } catch {
+        return false
+      }
+    },
+    [chess],
+  )
+
   const reset = useCallback(
     (fen?: string) => {
       if (fen) {
@@ -171,6 +187,7 @@ export function useChessGame(options?: UseChessGameOptions): UseChessGameReturn 
     addEngineMove,
     reset,
     getLegalMoves,
+    isPromotionMove,
     pgn,
   }
 }
