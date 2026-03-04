@@ -50,14 +50,30 @@ def load_epd_openings(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped:
+        if not stripped or stripped.startswith("#") or stripped.startswith("%"):
             continue
 
-        # EPD format: FEN fields ; operations
-        # Split on semicolon and take the FEN part
-        fen_part = stripped.split(";")[0].strip()
-        if fen_part:
-            fens.append(fen_part)
+        # EPD format: <4 FEN fields> [halfmove fullmove] [operations] [; more operations]
+        # Split on semicolon first to remove trailing operations
+        before_semi = stripped.split(";")[0].strip()
+        if not before_semi:
+            continue
+
+        fields = before_semi.split()
+        if len(fields) < 4:
+            continue
+
+        # Always take the first 4 FEN fields
+        fen_fields = fields[:4]
+
+        # Check if fields 5-6 are halfmove/fullmove counters (both numeric)
+        if len(fields) >= 6 and fields[4].isdigit() and fields[5].isdigit():
+            fen_fields = fields[:6]
+        else:
+            # 4-field EPD: append default halfmove clock and fullmove counter
+            fen_fields.extend(["0", "1"])
+
+        fens.append(" ".join(fen_fields))
 
     return fens
 
