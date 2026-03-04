@@ -87,7 +87,7 @@ class GameConfig:
     move_overhead_ms: int = 5000
 
 
-def _watchdog_timeout_ms(tc: TimeControl, *, is_white: bool) -> int:
+def watchdog_timeout_ms(tc: TimeControl, *, is_white: bool) -> int:
     """Return the expected move duration in milliseconds for watchdog calculation.
 
     For time-bounded controls (movetime, wtime/btime) returns the relevant
@@ -208,7 +208,7 @@ async def play_game(
             # Search with per-move watchdog deadline using time.monotonic_ns()
             if config.move_overhead_ms > 0:
                 start_ns = time.monotonic_ns()
-                tc_duration_ms = _watchdog_timeout_ms(config.time_control, is_white=is_white)
+                tc_duration_ms = watchdog_timeout_ms(config.time_control, is_white=is_white)
                 timeout_s = (tc_duration_ms + config.move_overhead_ms) / 1000.0
                 try:
                     bestmove, infos = await asyncio.wait_for(

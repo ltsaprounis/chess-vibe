@@ -19,8 +19,8 @@ from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import (
     GameConfig,
     TerminationReason,
-    _watchdog_timeout_ms,
     play_game,
+    watchdog_timeout_ms,
 )
 
 
@@ -298,25 +298,25 @@ class TestPlayGame:
 
 
 class TestWatchdogTimeoutMs:
-    """Tests for _watchdog_timeout_ms helper."""
+    """Tests for watchdog_timeout_ms helper."""
 
     def test_fixed_time_returns_movetime(self) -> None:
         tc = FixedTimeControl(movetime_ms=10000)
-        assert _watchdog_timeout_ms(tc, is_white=True) == 10000
-        assert _watchdog_timeout_ms(tc, is_white=False) == 10000
+        assert watchdog_timeout_ms(tc, is_white=True) == 10000
+        assert watchdog_timeout_ms(tc, is_white=False) == 10000
 
     def test_increment_returns_current_side_time(self) -> None:
         tc = IncrementTimeControl(wtime_ms=60000, btime_ms=30000)
-        assert _watchdog_timeout_ms(tc, is_white=True) == 60000
-        assert _watchdog_timeout_ms(tc, is_white=False) == 30000
+        assert watchdog_timeout_ms(tc, is_white=True) == 60000
+        assert watchdog_timeout_ms(tc, is_white=False) == 30000
 
     def test_depth_returns_zero(self) -> None:
         tc = DepthTimeControl(depth=20)
-        assert _watchdog_timeout_ms(tc, is_white=True) == 0
+        assert watchdog_timeout_ms(tc, is_white=True) == 0
 
     def test_nodes_returns_zero(self) -> None:
         tc = NodesTimeControl(nodes=50000)
-        assert _watchdog_timeout_ms(tc, is_white=False) == 0
+        assert watchdog_timeout_ms(tc, is_white=False) == 0
 
 
 class TestWatchdogIntegration:
