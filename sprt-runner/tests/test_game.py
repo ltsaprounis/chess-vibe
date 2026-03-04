@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from unittest.mock import AsyncMock, MagicMock
 
@@ -237,7 +238,6 @@ class TestPlayGame:
     @pytest.mark.asyncio
     async def test_move_watchdog_timeout(self) -> None:
         """Test that watchdog timeout triggers when engine takes too long."""
-        import asyncio
 
         white_engine = MagicMock()
         white_engine.start = AsyncMock()
@@ -357,7 +357,6 @@ class TestWatchdogIntegration:
         movetime=100ms + overhead=50ms = 150ms total deadline.
         Engine sleeps for 10s, so the watchdog should fire.
         """
-        import asyncio as _asyncio
 
         white_engine = MagicMock()
         white_engine.start = AsyncMock()
@@ -369,7 +368,7 @@ class TestWatchdogIntegration:
         white_engine.is_running = True
 
         async def slow_go(_tc: object) -> tuple[BestMove, list[UCIInfo]]:
-            await _asyncio.sleep(10)
+            await asyncio.sleep(10)
             return BestMove(move="e2e4"), []
 
         white_engine.go = AsyncMock(side_effect=slow_go)
