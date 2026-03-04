@@ -326,6 +326,31 @@ def worker_entry(
     result_queue.put(worker_result)
 
 
+def _cleanup_workers(
+    active_workers: list[multiprocessing.Process],
+) -> list[multiprocessing.Process]:
+    """Join finished workers and return only those still alive.
+
+    Calls ``join(timeout=1)`` on every worker *before* checking
+    ``is_alive()``.  This closes the race window where a worker has
+    already put its result on the queue but hasn't fully exited yet
+    — ``join`` gives it a brief moment to finish, so ``is_alive()``
+    returns ``False`` and the slot is freed for a new worker.
+
+    Args:
+        active_workers: List of currently tracked worker processes.
+
+    Returns:
+        A new list containing only the workers that are still alive.
+    """
+    still_alive: list[multiprocessing.Process] = []
+    for w in active_workers:
+        w.join(timeout=1)
+        if w.is_alive():
+            still_alive.append(w)
+    return still_alive
+
+
 async def run_sprt(config: RunConfig) -> None:
     """Run a complete SPRT test.
 
@@ -431,13 +456,7 @@ async def run_sprt(config: RunConfig) -> None:
             continue
 
         # Clean up finished workers (join to free resources)
-        still_alive: list[multiprocessing.Process] = []
-        for w in active_workers:
-            if w.is_alive():
-                still_alive.append(w)
-            else:
-                w.join(timeout=1)
-        active_workers = still_alive
+        active_workers = _cleanup_workers(active_workers)
 
         # Handle result
         if worker_result.error is not None:
