@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import multiprocessing
 from pathlib import Path
@@ -518,3 +519,92 @@ class TestColorAssignmentWithBook:
                 f"got {task.swap_colors}"
             )
             assert task.game_config.start_fen == expected_pair.fen
+
+
+class _SlowFakeProcess:
+    """Fake process that delays putting the result on the queue.
+
+    This simulates a real worker that takes time to produce a result,
+    allowing us to verify that the event loop remains responsive while
+    waiting for ``result_queue.get()``.
+    """
+
+    captured_tasks: ClassVar[list[WorkerTask]] = []
+
+    def __init__(
+        self,
+        *,
+        target: object = None,
+        args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+    ) -> None:
+        self._task, self._queue = args
+        _SlowFakeProcess.captured_tasks.append(self._task)
+        self._alive = True
+
+    def start(self) -> None:
+        """Schedule delayed result delivery via the event loop."""
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.05, self._deliver)
+
+    def _deliver(self) -> None:
+        self._queue.put(
+            WorkerResult(
+                game_id=self._task.game_id,
+                result=GameResult.WHITE_WIN,
+                termination="checkmate",
+                move_count=20,
+                swap_colors=self._task.swap_colors,
+            )
+        )
+        self._alive = False
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+    def terminate(self) -> None:
+        pass
+
+
+class TestRunSprtNonBlocking:
+    """Verify that run_sprt() does not block the event loop."""
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_queue_wait(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """run_sprt() should be cancellable while waiting for a worker result.
+
+        If the blocking ``result_queue.get()`` were called directly (without
+        ``run_in_executor``), ``asyncio.CancelledError`` could not be delivered
+        until the 300-second timeout expired.  With the executor wrapper the
+        cancellation is delivered promptly.
+        """
+        _SlowFakeProcess.captured_tasks = []
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _SlowFakeProcess)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+        )
+
+        task = asyncio.create_task(run_sprt(config))
+
+        # Let the first worker be launched and the await to begin
+        await asyncio.sleep(0.01)
+
+        # Cancel the task — should succeed promptly
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
