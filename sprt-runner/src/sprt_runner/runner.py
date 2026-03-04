@@ -470,7 +470,10 @@ async def run_sprt(config: RunConfig) -> None:
             dead = [w for w in active_workers if not w.is_alive()]
             for w in dead:
                 wpid = w.pid
-                dead_game_id = worker_game_ids.pop(wpid, "unknown") if wpid is not None else "unknown"
+                if wpid is not None:
+                    dead_game_id = worker_game_ids.pop(wpid, "unknown")
+                else:
+                    dead_game_id = "unknown"
                 print(
                     format_error_message(
                         f"Worker for game {dead_game_id} died unexpectedly (pid={wpid})"
@@ -490,9 +493,13 @@ async def run_sprt(config: RunConfig) -> None:
 
         # The worker that produced this result has done its job — remove
         # its entry from the mapping so it is not flagged as a dead worker.
-        worker_game_ids = {
-            pid: gid for pid, gid in worker_game_ids.items() if gid != worker_result.game_id
-        }
+        pid_to_remove: int | None = None
+        for pid, gid in worker_game_ids.items():
+            if gid == worker_result.game_id:
+                pid_to_remove = pid
+                break
+        if pid_to_remove is not None:
+            del worker_game_ids[pid_to_remove]
 
         # Detect workers that exited without producing any result
         # (i.e. their PID is gone from active_workers but their game_id
