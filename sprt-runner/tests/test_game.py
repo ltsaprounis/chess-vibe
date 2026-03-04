@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from shared.storage.models import GameResult
-from shared.time_control import DepthTimeControl, FixedTimeControl
+from shared.time_control import (
+    DepthTimeControl,
+    FixedTimeControl,
+    IncrementTimeControl,
+    NodesTimeControl,
+)
 from shared.uci_client import BestMove, UCIInfo, UCIScore
 from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import (
     GameConfig,
     TerminationReason,
     play_game,
+    watchdog_timeout_ms,
 )
 
 
@@ -231,7 +238,6 @@ class TestPlayGame:
     @pytest.mark.asyncio
     async def test_move_watchdog_timeout(self) -> None:
         """Test that watchdog timeout triggers when engine takes too long."""
-        import asyncio
 
         white_engine = MagicMock()
         white_engine.start = AsyncMock()
@@ -279,6 +285,154 @@ class TestPlayGame:
             time_control=DepthTimeControl(depth=5),
             adjudication=AdjudicationConfig(win_consecutive_moves=0, draw_consecutive_moves=0),
             move_overhead_ms=0,  # Disabled
+        )
+
+        outcome = await play_game(
+            white=white_engine,
+            black=black_engine,
+            config=config,
+        )
+
+        assert outcome.result == GameResult.WHITE_WIN
+        assert outcome.termination == TerminationReason.CHECKMATE
+
+
+class TestWatchdogTimeoutMs:
+    """Tests for watchdog_timeout_ms helper."""
+
+    def test_fixed_time_returns_movetime(self) -> None:
+        tc = FixedTimeControl(movetime_ms=10000)
+        assert watchdog_timeout_ms(tc, is_white=True) == 10000
+        assert watchdog_timeout_ms(tc, is_white=False) == 10000
+
+    def test_increment_returns_current_side_time(self) -> None:
+        tc = IncrementTimeControl(wtime_ms=60000, btime_ms=30000)
+        assert watchdog_timeout_ms(tc, is_white=True) == 60000
+        assert watchdog_timeout_ms(tc, is_white=False) == 30000
+
+    def test_depth_returns_zero(self) -> None:
+        tc = DepthTimeControl(depth=20)
+        assert watchdog_timeout_ms(tc, is_white=True) == 0
+
+    def test_nodes_returns_zero(self) -> None:
+        tc = NodesTimeControl(nodes=50000)
+        assert watchdog_timeout_ms(tc, is_white=False) == 0
+
+
+class TestWatchdogIntegration:
+    """Integration tests for watchdog timeout in play_game."""
+
+    @pytest.mark.asyncio
+    async def test_movetime_watchdog_does_not_fire_early(self) -> None:
+        """With movetime=10000 and overhead=5000, watchdog should not fire before 10s.
+
+        The mock engine responds instantly, so the watchdog (10s + 5s = 15s)
+        should never trigger and the game should complete normally.
+        """
+        white_moves = ["e2e4", "d1h5", "f1c4", "h5f7"]
+        black_moves = ["e7e5", "b8c6", "g8f6"]
+
+        white_engine = _mock_engine(white_moves)
+        black_engine = _mock_engine(black_moves)
+
+        config = GameConfig(
+            time_control=FixedTimeControl(movetime_ms=10000),
+            adjudication=AdjudicationConfig(win_consecutive_moves=0, draw_consecutive_moves=0),
+            move_overhead_ms=5000,
+        )
+
+        outcome = await play_game(
+            white=white_engine,
+            black=black_engine,
+            config=config,
+        )
+
+        assert outcome.result == GameResult.WHITE_WIN
+        assert outcome.termination == TerminationReason.CHECKMATE
+
+    @pytest.mark.asyncio
+    async def test_movetime_watchdog_fires_after_total_deadline(self) -> None:
+        """Watchdog fires after movetime + overhead when engine hangs.
+
+        movetime=100ms + overhead=50ms = 150ms total deadline.
+        Engine sleeps for 10s, so the watchdog should fire.
+        """
+
+        white_engine = MagicMock()
+        white_engine.start = AsyncMock()
+        white_engine.quit = AsyncMock()
+        white_engine.uci = AsyncMock(return_value=[])
+        white_engine.isready = AsyncMock()
+        white_engine.position = AsyncMock()
+        white_engine.stop = AsyncMock()
+        white_engine.is_running = True
+
+        async def slow_go(_tc: object) -> tuple[BestMove, list[UCIInfo]]:
+            await asyncio.sleep(10)
+            return BestMove(move="e2e4"), []
+
+        white_engine.go = AsyncMock(side_effect=slow_go)
+        black_engine = _mock_engine(["e7e5"])
+
+        config = GameConfig(
+            time_control=FixedTimeControl(movetime_ms=100),
+            adjudication=AdjudicationConfig(win_consecutive_moves=0, draw_consecutive_moves=0),
+            move_overhead_ms=50,  # total = 150ms; engine sleeps 10s → timeout
+        )
+
+        outcome = await play_game(
+            white=white_engine,
+            black=black_engine,
+            config=config,
+        )
+
+        assert outcome.result == GameResult.BLACK_WIN
+        assert outcome.termination == TerminationReason.TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_increment_tc_watchdog_uses_side_clock(self) -> None:
+        """For wtime/btime TC, watchdog uses the current side's remaining time.
+
+        White has 60s remaining + 50ms overhead = 60.05s deadline.
+        Engine responds instantly, so no timeout.
+        """
+        white_moves = ["e2e4", "d1h5", "f1c4", "h5f7"]
+        black_moves = ["e7e5", "b8c6", "g8f6"]
+
+        white_engine = _mock_engine(white_moves)
+        black_engine = _mock_engine(black_moves)
+
+        config = GameConfig(
+            time_control=IncrementTimeControl(wtime_ms=60000, btime_ms=60000),
+            adjudication=AdjudicationConfig(win_consecutive_moves=0, draw_consecutive_moves=0),
+            move_overhead_ms=50,
+        )
+
+        outcome = await play_game(
+            white=white_engine,
+            black=black_engine,
+            config=config,
+        )
+
+        assert outcome.result == GameResult.WHITE_WIN
+        assert outcome.termination == TerminationReason.CHECKMATE
+
+    @pytest.mark.asyncio
+    async def test_depth_tc_watchdog_uses_overhead_only(self) -> None:
+        """For depth TC, watchdog uses only move_overhead_ms (no time bound).
+
+        Engine responds instantly, so the overhead-only watchdog never fires.
+        """
+        white_moves = ["e2e4", "d1h5", "f1c4", "h5f7"]
+        black_moves = ["e7e5", "b8c6", "g8f6"]
+
+        white_engine = _mock_engine(white_moves)
+        black_engine = _mock_engine(black_moves)
+
+        config = GameConfig(
+            time_control=DepthTimeControl(depth=5),
+            adjudication=AdjudicationConfig(win_consecutive_moves=0, draw_consecutive_moves=0),
+            move_overhead_ms=5000,
         )
 
         outcome = await play_game(

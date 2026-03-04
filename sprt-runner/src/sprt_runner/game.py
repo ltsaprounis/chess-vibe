@@ -16,7 +16,11 @@ from enum import Enum
 
 import chess
 from shared.storage.models import GameResult, Move
-from shared.time_control import TimeControl
+from shared.time_control import (
+    FixedTimeControl,
+    IncrementTimeControl,
+    TimeControl,
+)
 from shared.uci_client import UCIClient, UCIEngineError, UCIInfo, UCITimeoutError
 
 from sprt_runner.adjudication import (
@@ -67,9 +71,13 @@ class GameConfig:
         start_fen: Custom starting FEN, or None for standard start.
         max_moves: Maximum number of full moves before declaring a draw.
         move_overhead_ms: Per-move watchdog timeout overhead in milliseconds.
-            The total per-move deadline is the time control limit plus this
-            overhead. Set to 0 to disable the watchdog. Uses
-            ``time.monotonic_ns()`` for deadline tracking.
+            The total per-move deadline is the time control's expected
+            duration plus this overhead.  For ``movetime`` the expected
+            duration equals ``movetime_ms``; for ``wtime/btime`` it equals
+            the current side's remaining time; for unbounded controls
+            (``depth``/``nodes``) only the overhead applies.  Set to 0 to
+            disable the watchdog.  Uses ``time.monotonic_ns()`` for deadline
+            tracking.
     """
 
     time_control: TimeControl
@@ -77,6 +85,29 @@ class GameConfig:
     start_fen: str | None = None
     max_moves: int = 500
     move_overhead_ms: int = 5000
+
+
+def watchdog_timeout_ms(tc: TimeControl, *, is_white: bool) -> int:
+    """Return the expected move duration in milliseconds for watchdog calculation.
+
+    For time-bounded controls (movetime, wtime/btime) returns the relevant
+    time limit so the watchdog fires only *after* the engine's legitimate
+    search window.  For unbounded controls (depth/nodes) returns 0 so the
+    caller falls back to ``move_overhead_ms`` alone.
+
+    Args:
+        tc: The active time control.
+        is_white: Whether it is white's turn (selects wtime vs btime).
+
+    Returns:
+        Expected duration in milliseconds (0 for unbounded TCs).
+    """
+    if isinstance(tc, FixedTimeControl):
+        return tc.movetime_ms
+    if isinstance(tc, IncrementTimeControl):
+        return tc.wtime_ms if is_white else tc.btime_ms
+    # DepthTimeControl / NodesTimeControl have no time bound
+    return 0
 
 
 def _extract_score_cp(infos: list[UCIInfo]) -> int | None:
@@ -177,7 +208,8 @@ async def play_game(
             # Search with per-move watchdog deadline using time.monotonic_ns()
             if config.move_overhead_ms > 0:
                 start_ns = time.monotonic_ns()
-                timeout_s = config.move_overhead_ms / 1000.0
+                tc_duration_ms = watchdog_timeout_ms(config.time_control, is_white=is_white)
+                timeout_s = (tc_duration_ms + config.move_overhead_ms) / 1000.0
                 try:
                     bestmove, infos = await asyncio.wait_for(
                         engine.go(config.time_control),
