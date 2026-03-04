@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+from unittest.mock import MagicMock
 
 import pytest
 from shared.storage.models import GameResult
@@ -14,6 +15,7 @@ from sprt_runner.runner import (
     RunConfig,
     WorkerResult,
     WorkerTask,
+    _cleanup_workers,
     format_complete_message,
     format_error_message,
     format_game_result_message,
@@ -233,3 +235,112 @@ class TestWorkerEntry:
         assert result.game_id == "test-game"
         # Should be an error since the engine doesn't exist
         assert result.error is not None
+
+
+class TestCleanupWorkers:
+    """Tests for the _cleanup_workers helper that joins finished workers."""
+
+    def test_worker_still_alive_after_join_stays_in_list(self) -> None:
+        """A genuinely alive worker stays in active_workers after cleanup."""
+        worker = MagicMock(spec=multiprocessing.Process)
+        worker.is_alive.return_value = True
+
+        result = _cleanup_workers([worker])
+
+        worker.join.assert_called_once_with(timeout=1)
+        assert result == [worker]
+
+    def test_worker_exits_after_join_is_removed(self) -> None:
+        """A worker that exits during join() is removed from active_workers."""
+        worker = MagicMock(spec=multiprocessing.Process)
+        worker.is_alive.return_value = False
+
+        result = _cleanup_workers([worker])
+
+        worker.join.assert_called_once_with(timeout=1)
+        assert result == []
+
+    def test_race_condition_worker_alive_then_exits(self) -> None:
+        """Simulates the race: worker is alive before join, exits during join.
+
+        Before the fix, is_alive() was checked *before* join(), so the worker
+        would stay in active_workers even though it had finished. The fix calls
+        join(timeout=1) first, giving the worker time to exit, then checks
+        is_alive().
+        """
+        worker = MagicMock(spec=multiprocessing.Process)
+
+        # Simulate: join() causes the worker to finish, so is_alive() returns False
+        def side_effect(timeout: int = 0) -> None:
+            worker.is_alive.return_value = False
+
+        worker.join.side_effect = side_effect
+        worker.is_alive.return_value = True  # alive before join
+
+        result = _cleanup_workers([worker])
+
+        worker.join.assert_called_once_with(timeout=1)
+        worker.is_alive.assert_called()
+        assert result == []
+
+    def test_multiple_workers_mixed_states(self) -> None:
+        """With multiple workers, only genuinely alive ones remain."""
+        alive_worker = MagicMock(spec=multiprocessing.Process)
+        alive_worker.is_alive.return_value = True
+
+        dead_worker = MagicMock(spec=multiprocessing.Process)
+        dead_worker.is_alive.return_value = False
+
+        racing_worker = MagicMock(spec=multiprocessing.Process)
+
+        def race_side_effect(timeout: int = 0) -> None:
+            racing_worker.is_alive.return_value = False
+
+        racing_worker.join.side_effect = race_side_effect
+        racing_worker.is_alive.return_value = True
+
+        result = _cleanup_workers([alive_worker, dead_worker, racing_worker])
+
+        assert result == [alive_worker]
+        alive_worker.join.assert_called_once_with(timeout=1)
+        dead_worker.join.assert_called_once_with(timeout=1)
+        racing_worker.join.assert_called_once_with(timeout=1)
+
+    def test_no_zombie_processes_all_finished_joined(self) -> None:
+        """All finished workers have join() called to prevent zombies."""
+        workers = []
+        for _ in range(3):
+            w = MagicMock(spec=multiprocessing.Process)
+            w.is_alive.return_value = False
+            workers.append(w)
+
+        result = _cleanup_workers(workers)
+
+        assert result == []
+        for w in workers:
+            w.join.assert_called_once_with(timeout=1)
+
+    def test_empty_worker_list(self) -> None:
+        """Cleanup with no workers returns empty list."""
+        result = _cleanup_workers([])
+        assert result == []
+
+    def test_concurrency_one_sequential_cleanup(self) -> None:
+        """At concurrency=1, a single worker that finishes is cleaned up.
+
+        This is the core scenario: after result_queue.get() returns at
+        concurrency=1, the single worker must be cleaned up so a new
+        worker can be launched.
+        """
+        worker = MagicMock(spec=multiprocessing.Process)
+
+        def finish_on_join(timeout: int = 0) -> None:
+            worker.is_alive.return_value = False
+
+        worker.join.side_effect = finish_on_join
+        worker.is_alive.return_value = True
+
+        result = _cleanup_workers([worker])
+
+        assert result == []
+        worker.join.assert_called_once_with(timeout=1)
