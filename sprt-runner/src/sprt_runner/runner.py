@@ -42,6 +42,11 @@ from sprt_runner.worktree import parse_engine_spec, resolve_engine_path
 
 logger = logging.getLogger(__name__)
 
+# Default timeout (seconds) for ``result_queue.get()`` in the SPRT loop.
+# Extracted as a module-level constant so tests can monkeypatch it to a
+# small value without waiting 5 minutes for a dead-worker timeout.
+_QUEUE_TIMEOUT_SECONDS: float = 300
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -120,6 +125,7 @@ def format_progress_message(
     lower_bound: float,
     upper_bound: float,
     games_total: int,
+    errors: int = 0,
 ) -> str:
     """Format SPRT progress as a JSON-lines message.
 
@@ -131,6 +137,7 @@ def format_progress_message(
         lower_bound: Lower SPRT boundary.
         upper_bound: Upper SPRT boundary.
         games_total: Total games played.
+        errors: Number of games lost to dead workers.
 
     Returns:
         Single-line JSON string.
@@ -145,6 +152,7 @@ def format_progress_message(
             "lower_bound": lower_bound,
             "upper_bound": upper_bound,
             "games_total": games_total,
+            "errors": errors,
         }
     )
 
@@ -388,6 +396,7 @@ async def run_sprt(config: RunConfig) -> None:
     wins = 0
     losses = 0
     draws = 0
+    errors = 0
     games_played = 0
     pair_index = 0
 
@@ -395,6 +404,8 @@ async def run_sprt(config: RunConfig) -> None:
     result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
 
     active_workers: list[multiprocessing.Process] = []
+    # Map worker PID → game_id so dead workers can be identified.
+    worker_game_ids: dict[int, str] = {}
 
     while True:
         # Launch workers up to concurrency limit
@@ -443,17 +454,30 @@ async def run_sprt(config: RunConfig) -> None:
             )
             worker.start()
             active_workers.append(worker)
+            assert worker.pid is not None  # guaranteed after start()
+            worker_game_ids[worker.pid] = game_id
 
         # Wait for a result from any worker (with timeout for crash safety).
         # Offload the blocking queue.get() to a thread so the asyncio event
         # loop stays responsive (allows cancellation, status updates, etc.).
         loop = asyncio.get_running_loop()
         try:
-            worker_result = await loop.run_in_executor(None, lambda: result_queue.get(timeout=300))
+            worker_result = await loop.run_in_executor(
+                None, lambda: result_queue.get(timeout=_QUEUE_TIMEOUT_SECONDS)
+            )
         except Exception:
             # Queue timeout — check for dead workers
             dead = [w for w in active_workers if not w.is_alive()]
             for w in dead:
+                wpid = w.pid
+                dead_game_id = worker_game_ids.pop(wpid, "unknown") if wpid is not None else "unknown"
+                print(
+                    format_error_message(
+                        f"Worker for game {dead_game_id} died unexpectedly (pid={wpid})"
+                    ),
+                    flush=True,
+                )
+                errors += 1
                 w.join(timeout=1)
             active_workers = [w for w in active_workers if w.is_alive()]
             if not active_workers:
@@ -463,6 +487,27 @@ async def run_sprt(config: RunConfig) -> None:
 
         # Clean up finished workers (join to free resources)
         active_workers = _cleanup_workers(active_workers)
+
+        # The worker that produced this result has done its job — remove
+        # its entry from the mapping so it is not flagged as a dead worker.
+        worker_game_ids = {
+            pid: gid for pid, gid in worker_game_ids.items() if gid != worker_result.game_id
+        }
+
+        # Detect workers that exited without producing any result
+        # (i.e. their PID is gone from active_workers but their game_id
+        # was never consumed from the queue).
+        active_pids = {w.pid for w in active_workers}
+        for pid in list(worker_game_ids):
+            if pid not in active_pids:
+                dead_game_id = worker_game_ids.pop(pid)
+                print(
+                    format_error_message(
+                        f"Worker for game {dead_game_id} died unexpectedly (pid={pid})"
+                    ),
+                    flush=True,
+                )
+                errors += 1
 
         # Handle result
         if worker_result.error is not None:
@@ -527,6 +572,7 @@ async def run_sprt(config: RunConfig) -> None:
                 lower_bound=sprt_result.lower_bound,
                 upper_bound=sprt_result.upper_bound,
                 games_total=games_played,
+                errors=errors,
             ),
             flush=True,
         )

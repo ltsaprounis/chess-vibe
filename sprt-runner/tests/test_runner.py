@@ -28,6 +28,9 @@ from sprt_runner.runner import (
     worker_entry,
 )
 
+# Re-export for monkeypatching
+_QUEUE_TIMEOUT_SECONDS = "sprt_runner.runner._QUEUE_TIMEOUT_SECONDS"
+
 
 class TestParseTimeControl:
     """Tests for CLI time control string parsing."""
@@ -364,6 +367,7 @@ class _FakeProcess:
     """
 
     captured_tasks: ClassVar[list[WorkerTask]] = []
+    _next_pid: ClassVar[int] = 7000
 
     def __init__(
         self,
@@ -383,6 +387,12 @@ class _FakeProcess:
             )
         )
         self._alive = False
+        self._pid = _FakeProcess._next_pid
+        _FakeProcess._next_pid += 1
+
+    @property
+    def pid(self) -> int:
+        return self._pid
 
     def start(self) -> None:
         pass
@@ -530,6 +540,7 @@ class _SlowFakeProcess:
     """
 
     captured_tasks: ClassVar[list[WorkerTask]] = []
+    _next_pid: ClassVar[int] = 6000
 
     def __init__(
         self,
@@ -540,6 +551,12 @@ class _SlowFakeProcess:
         self._task, self._queue = args
         _SlowFakeProcess.captured_tasks.append(self._task)
         self._alive = True
+        self._pid = _SlowFakeProcess._next_pid
+        _SlowFakeProcess._next_pid += 1
+
+    @property
+    def pid(self) -> int:
+        return self._pid
 
     def start(self) -> None:
         """Schedule delayed result delivery via the event loop."""
@@ -608,3 +625,235 @@ class TestRunSprtNonBlocking:
 
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+# ---------------------------------------------------------------------------
+# Dead-worker error reporting tests
+# ---------------------------------------------------------------------------
+
+
+class TestProgressMessageWithErrors:
+    """Verify format_progress_message includes the errors field."""
+
+    def test_progress_message_default_errors(self) -> None:
+        """Errors defaults to 0 when not specified."""
+        msg = format_progress_message(
+            wins=1, losses=0, draws=0, llr=0.5, lower_bound=-2.94, upper_bound=2.94, games_total=1
+        )
+        parsed = json.loads(msg)
+        assert parsed["errors"] == 0
+
+    def test_progress_message_with_errors(self) -> None:
+        """Errors field is included when explicitly set."""
+        msg = format_progress_message(
+            wins=5,
+            losses=2,
+            draws=1,
+            llr=1.0,
+            lower_bound=-2.94,
+            upper_bound=2.94,
+            games_total=8,
+            errors=3,
+        )
+        parsed = json.loads(msg)
+        assert parsed["errors"] == 3
+        assert parsed["games_total"] == 8
+
+
+class _DeadFakeProcess:
+    """Fake process that simulates a worker dying without producing a result.
+
+    Never puts anything on the queue, immediately reports ``is_alive()``
+    as ``False``, and exposes a deterministic ``pid``.
+    """
+
+    captured_tasks: ClassVar[list[WorkerTask]] = []
+    _next_pid: ClassVar[int] = 9000
+
+    def __init__(
+        self,
+        *,
+        target: object = None,
+        args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+    ) -> None:
+        task, _queue = args
+        _DeadFakeProcess.captured_tasks.append(task)
+        # Do NOT put anything on the queue — simulates death before result
+        self._alive = False
+        self._pid = _DeadFakeProcess._next_pid
+        _DeadFakeProcess._next_pid += 1
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+    def start(self) -> None:
+        pass
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+    def terminate(self) -> None:
+        pass
+
+
+class TestDeadWorkerErrorReporting:
+    """Verify that dead workers produce error messages with game IDs."""
+
+    @pytest.mark.asyncio
+    async def test_dead_worker_emits_error_with_game_id(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """When a worker dies without producing a result, an error identifying
+        the game ID is emitted to stdout."""
+        _DeadFakeProcess.captured_tasks = []
+        _DeadFakeProcess._next_pid = 9000
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _DeadFakeProcess)
+        # Use a tiny timeout so the test doesn't wait 300 s
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+        )
+
+        await run_sprt(config)
+
+        captured = capsys.readouterr().out
+        lines = [line for line in captured.strip().split("\n") if line]
+
+        # There should be at least two error messages:
+        # 1) per-game error with game ID
+        # 2) "All workers died unexpectedly"
+        error_msgs = [json.loads(line) for line in lines if '"type": "error"' in line]
+        assert len(error_msgs) >= 2
+
+        # First error should identify the game with game ID and PID
+        per_game_error = error_msgs[0]
+        assert per_game_error["type"] == "error"
+        assert "died unexpectedly" in per_game_error["message"]
+        assert "pid=" in per_game_error["message"]
+
+        # The game ID in the error should match the captured task
+        captured_game_id = _DeadFakeProcess.captured_tasks[0].game_id
+        assert captured_game_id in per_game_error["message"]
+
+        # Last error should be the "all workers died" message
+        all_dead_error = error_msgs[-1]
+        assert "All workers died unexpectedly" in all_dead_error["message"]
+
+    @pytest.mark.asyncio
+    async def test_dead_worker_errors_are_counted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Dead-worker games increment the errors counter.
+
+        We combine a dead worker (first) with a healthy worker (second)
+        that delivers a normal result, triggering a progress message.
+        The progress message should contain errors >= 1.
+        """
+
+        class _FirstDeadThenAliveFakeProcess:
+            """First worker dies; subsequent workers succeed immediately."""
+
+            captured_tasks: ClassVar[list[WorkerTask]] = []
+            _call_count: ClassVar[int] = 0
+            _next_pid: ClassVar[int] = 8000
+
+            def __init__(
+                self,
+                *,
+                target: object = None,
+                args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+            ) -> None:
+                task, queue = args
+                _FirstDeadThenAliveFakeProcess.captured_tasks.append(task)
+                self._pid = _FirstDeadThenAliveFakeProcess._next_pid
+                _FirstDeadThenAliveFakeProcess._next_pid += 1
+                call = _FirstDeadThenAliveFakeProcess._call_count
+                _FirstDeadThenAliveFakeProcess._call_count += 1
+
+                if call == 0:
+                    # First worker dies without putting a result
+                    self._alive = False
+                else:
+                    # Subsequent workers succeed immediately
+                    queue.put(
+                        WorkerResult(
+                            game_id=task.game_id,
+                            result=GameResult.WHITE_WIN,
+                            termination="checkmate",
+                            move_count=20,
+                            swap_colors=task.swap_colors,
+                        )
+                    )
+                    self._alive = False
+
+            @property
+            def pid(self) -> int:
+                return self._pid
+
+            def start(self) -> None:
+                pass
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+            def join(self, timeout: float | None = None) -> None:
+                pass
+
+            def terminate(self) -> None:
+                pass
+
+        _FirstDeadThenAliveFakeProcess.captured_tasks = []
+        _FirstDeadThenAliveFakeProcess._call_count = 0
+        _FirstDeadThenAliveFakeProcess._next_pid = 8000
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr(
+            "sprt_runner.runner.multiprocessing.Process", _FirstDeadThenAliveFakeProcess
+        )
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+            concurrency=2,
+        )
+
+        await run_sprt(config)
+
+        captured = capsys.readouterr().out
+        lines = [line for line in captured.strip().split("\n") if line]
+
+        # Find progress messages — they should have errors >= 1
+        progress_msgs = [json.loads(line) for line in lines if '"type": "progress"' in line]
+        assert len(progress_msgs) >= 1
+
+        first_progress = progress_msgs[0]
+        assert first_progress["errors"] >= 1, "Progress should reflect the dead-worker error count"
