@@ -430,13 +430,17 @@ async def run_sprt(config: RunConfig) -> None:
                 break
             continue
 
-        # Clean up finished workers (join to free resources)
+        # Clean up finished workers (join to free resources).
+        # We call join() *before* is_alive() because result_queue.get()
+        # returns as soon as the worker calls put(), but the worker
+        # process may not have exited yet. Without the join(), is_alive()
+        # returns True, the worker stays in active_workers, and no new
+        # worker is launched — causing a ~300 s stall at concurrency=1.
         still_alive: list[multiprocessing.Process] = []
         for w in active_workers:
+            w.join(timeout=1)
             if w.is_alive():
                 still_alive.append(w)
-            else:
-                w.join(timeout=1)
         active_workers = still_alive
 
         # Handle result

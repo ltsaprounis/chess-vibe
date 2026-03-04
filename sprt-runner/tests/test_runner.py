@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from shared.storage.models import GameResult
@@ -18,6 +21,7 @@ from sprt_runner.runner import (
     format_error_message,
     format_game_result_message,
     format_progress_message,
+    run_sprt,
     worker_entry,
 )
 
@@ -233,3 +237,122 @@ class TestWorkerEntry:
         assert result.game_id == "test-game"
         # Should be an error since the engine doesn't exist
         assert result.error is not None
+
+
+class _FakeProcess:
+    """Fake multiprocessing.Process that simulates the race condition.
+
+    After ``start()``, ``is_alive()`` returns ``True`` (the process has
+    put its result on the queue but has not yet exited).  Only after
+    ``join()`` does ``is_alive()`` return ``False``.
+
+    This reproduces the timing window fixed by calling ``join()``
+    before ``is_alive()`` in ``run_sprt()``'s worker cleanup loop.
+    """
+
+    def __init__(self, *, target: Any, args: Any) -> None:
+        self._task: WorkerTask = args[0]
+        self._queue: multiprocessing.Queue[WorkerResult] = args[1]
+        self._alive = True
+
+    def start(self) -> None:
+        self._queue.put(
+            WorkerResult(
+                game_id=self._task.game_id,
+                result=GameResult.WHITE_WIN,
+                termination="checkmate",
+                move_count=10,
+                swap_colors=self._task.swap_colors,
+            )
+        )
+        # Simulate race: process is still alive after put()
+        self._alive = True
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        self._alive = False
+
+    def terminate(self) -> None:
+        self._alive = False
+
+
+class TestRunSprt:
+    """Tests for the run_sprt orchestration loop."""
+
+    @pytest.mark.asyncio
+    async def test_terminates_with_decision(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """run_sprt completes an SPRT test and outputs a decision."""
+        config = RunConfig(
+            base="random-engine",
+            test="random-engine",
+            time_control=DepthTimeControl(depth=1),
+            elo0=-500.0,
+            elo1=500.0,
+        )
+
+        with (
+            patch(
+                "sprt_runner.runner.resolve_engine_path",
+                new_callable=AsyncMock,
+                return_value=("fake_cmd", Path("/fake")),
+            ),
+            patch(
+                "sprt_runner.runner._resolve_run_command",
+                return_value="fake_resolved_cmd",
+            ),
+            patch("sprt_runner.runner.multiprocessing.Process", _FakeProcess),
+        ):
+            await run_sprt(config)
+
+        captured = capsys.readouterr()
+        lines = [json.loads(line) for line in captured.out.strip().split("\n")]
+
+        types = [msg["type"] for msg in lines]
+        assert "game_result" in types
+        assert "progress" in types
+        assert "complete" in types
+
+        complete = next(msg for msg in lines if msg["type"] == "complete")
+        assert complete["result"] in ("H0", "H1")
+        assert complete["total_games"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_worker_cleanup_handles_race_condition(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Workers that are still alive after put() are cleaned up by join().
+
+        Without the join-before-is_alive fix, the loop would stall because
+        the worker stays in active_workers and no new worker is launched.
+        With wide SPRT bounds a single decisive result triggers termination,
+        so the test completes quickly only if the race condition is handled.
+        """
+        config = RunConfig(
+            base="random-engine",
+            test="random-engine",
+            time_control=DepthTimeControl(depth=1),
+            elo0=-500.0,
+            elo1=500.0,
+        )
+
+        with (
+            patch(
+                "sprt_runner.runner.resolve_engine_path",
+                new_callable=AsyncMock,
+                return_value=("fake_cmd", Path("/fake")),
+            ),
+            patch(
+                "sprt_runner.runner._resolve_run_command",
+                return_value="fake_resolved_cmd",
+            ),
+            patch("sprt_runner.runner.multiprocessing.Process", _FakeProcess),
+        ):
+            await run_sprt(config)
+
+        captured = capsys.readouterr()
+        lines = [json.loads(line) for line in captured.out.strip().split("\n")]
+        complete = next(msg for msg in lines if msg["type"] == "complete")
+        # With the fix, SPRT terminates quickly (no 300 s stall per game)
+        assert complete["total_games"] <= 5
