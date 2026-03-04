@@ -444,9 +444,12 @@ async def run_sprt(config: RunConfig) -> None:
             worker.start()
             active_workers.append(worker)
 
-        # Wait for a result from any worker (with timeout for crash safety)
+        # Wait for a result from any worker (with timeout for crash safety).
+        # Offload the blocking queue.get() to a thread so the asyncio event
+        # loop stays responsive (allows cancellation, status updates, etc.).
+        loop = asyncio.get_running_loop()
         try:
-            worker_result = result_queue.get(timeout=300)
+            worker_result = await loop.run_in_executor(None, lambda: result_queue.get(timeout=300))
         except Exception:
             # Queue timeout — check for dead workers
             dead = [w for w in active_workers if not w.is_alive()]
