@@ -15,7 +15,7 @@ from sprt_runner.runner import (
     RunConfig,
     WorkerResult,
     WorkerTask,
-    _cleanup_workers,
+    _cleanup_workers,  # type: ignore[reportPrivateUsage]
     format_complete_message,
     format_error_message,
     format_game_result_message,
@@ -308,7 +308,7 @@ class TestCleanupWorkers:
 
     def test_no_zombie_processes_all_finished_joined(self) -> None:
         """All finished workers have join() called to prevent zombies."""
-        workers = []
+        workers: list[multiprocessing.Process] = []
         for _ in range(3):
             w = MagicMock(spec=multiprocessing.Process)
             w.is_alive.return_value = False
@@ -318,7 +318,7 @@ class TestCleanupWorkers:
 
         assert result == []
         for w in workers:
-            w.join.assert_called_once_with(timeout=1)
+            w.join.assert_called_once_with(timeout=1)  # type: ignore[union-attr]
 
     def test_empty_worker_list(self) -> None:
         """Cleanup with no workers returns empty list."""
