@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,6 +13,7 @@ from shared.storage.models import GameResult
 from shared.time_control import DepthTimeControl, FixedTimeControl, parse_time_control
 from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig
+from sprt_runner.openings import OpeningPair
 from sprt_runner.runner import (
     RunConfig,
     WorkerResult,
@@ -20,6 +23,7 @@ from sprt_runner.runner import (
     format_error_message,
     format_game_result_message,
     format_progress_message,
+    run_sprt,
     worker_entry,
 )
 
@@ -344,3 +348,173 @@ class TestCleanupWorkers:
 
         assert result == []
         worker.join.assert_called_once_with(timeout=1)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for run_sprt colour-assignment tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeProcess:
+    """Fake multiprocessing.Process that captures tasks and injects results.
+
+    Each "process" immediately puts a predefined result on the queue so the
+    coordinator loop advances without spawning a real subprocess.
+    """
+
+    captured_tasks: ClassVar[list[WorkerTask]] = []
+
+    def __init__(
+        self,
+        *,
+        target: object = None,
+        args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+    ) -> None:
+        task, queue = args
+        _FakeProcess.captured_tasks.append(task)
+        queue.put(
+            WorkerResult(
+                game_id=task.game_id,
+                result=GameResult.WHITE_WIN,
+                termination="checkmate",
+                move_count=20,
+                swap_colors=task.swap_colors,
+            )
+        )
+        self._alive = False
+
+    def start(self) -> None:
+        pass
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+    def terminate(self) -> None:
+        pass
+
+
+def _mock_parse_engine_spec(_spec: str) -> None:
+    """Mock parse_engine_spec that returns None for any input."""
+    return None
+
+
+def _mock_load_openings(_path: Path) -> list[str]:
+    """Mock load_openings that returns an empty list."""
+    return []
+
+
+class TestColorAlternationNoBook:
+    """Verify colour alternation when no opening book is provided."""
+
+    @pytest.mark.asyncio
+    async def test_no_book_alternates_colors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without an opening book, swap_colors should alternate each game."""
+        _FakeProcess.captured_tasks = []
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _FakeProcess)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+        )
+
+        await run_sprt(config)
+
+        # With alternating WHITE_WIN and elo1=500, SPRT converges quickly.
+        assert len(_FakeProcess.captured_tasks) >= 2
+
+        for i, task in enumerate(_FakeProcess.captured_tasks):
+            expected_swap = i % 2 == 1
+            assert task.swap_colors == expected_swap, (
+                f"Game {i}: expected swap_colors={expected_swap}, got {task.swap_colors}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_no_book_start_fen_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without an opening book, start_fen should always be None."""
+        _FakeProcess.captured_tasks = []
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _FakeProcess)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+        )
+
+        await run_sprt(config)
+
+        for task in _FakeProcess.captured_tasks:
+            assert task.game_config.start_fen is None
+
+
+class TestColorAssignmentWithBook:
+    """Verify book-based colour assignment is unchanged."""
+
+    @pytest.mark.asyncio
+    async def test_book_based_color_assignment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With an opening book, swap_colors follows the pair list."""
+        _FakeProcess.captured_tasks = []
+
+        e1e4_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+        d2d4_fen = "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1"
+        pairs = [
+            OpeningPair(fen=e1e4_fen, swap_colors=False),
+            OpeningPair(fen=e1e4_fen, swap_colors=True),
+            OpeningPair(fen=d2d4_fen, swap_colors=False),
+            OpeningPair(fen=d2d4_fen, swap_colors=True),
+        ]
+
+        def _mock_make_pairs(_fens: list[str]) -> list[OpeningPair]:
+            return pairs
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _FakeProcess)
+        # Inject opening_pairs directly by patching load_openings/make_opening_pairs
+        monkeypatch.setattr("sprt_runner.runner.load_openings", _mock_load_openings)
+        monkeypatch.setattr("sprt_runner.runner.make_opening_pairs", _mock_make_pairs)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=Path("/fake/book.epd"),
+        )
+
+        await run_sprt(config)
+
+        assert len(_FakeProcess.captured_tasks) >= 2
+
+        for i, task in enumerate(_FakeProcess.captured_tasks):
+            expected_pair = pairs[i % len(pairs)]
+            assert task.swap_colors == expected_pair.swap_colors, (
+                f"Game {i}: expected swap_colors={expected_pair.swap_colors}, "
+                f"got {task.swap_colors}"
+            )
+            assert task.game_config.start_fen == expected_pair.fen

@@ -407,6 +407,9 @@ async def run_sprt(config: RunConfig) -> None:
                 start_fen = pair.fen
                 swap_colors = pair.swap_colors
                 pair_index += 1
+            else:
+                swap_colors = pair_index % 2 == 1
+                pair_index += 1
 
             # Determine colour assignment
             if swap_colors:
