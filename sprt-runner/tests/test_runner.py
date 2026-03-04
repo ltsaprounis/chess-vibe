@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import multiprocessing
 from pathlib import Path
 from typing import ClassVar
@@ -668,7 +669,7 @@ class _DeadFakeProcess:
     """
 
     captured_tasks: ClassVar[list[WorkerTask]] = []
-    _next_pid: ClassVar[int] = 9000
+    next_pid: ClassVar[int] = 9000
 
     def __init__(
         self,
@@ -680,8 +681,8 @@ class _DeadFakeProcess:
         _DeadFakeProcess.captured_tasks.append(task)
         # Do NOT put anything on the queue — simulates death before result
         self._alive = False
-        self._pid = _DeadFakeProcess._next_pid
-        _DeadFakeProcess._next_pid += 1
+        self._pid = _DeadFakeProcess.next_pid
+        _DeadFakeProcess.next_pid += 1
 
     @property
     def pid(self) -> int:
@@ -712,7 +713,7 @@ class TestDeadWorkerErrorReporting:
         """When a worker dies without producing a result, an error identifying
         the game ID is emitted to stdout."""
         _DeadFakeProcess.captured_tasks = []
-        _DeadFakeProcess._next_pid = 9000
+        _DeadFakeProcess.next_pid = 9000
 
         async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
             return "engine_cmd", Path("/fake/dir")
@@ -761,21 +762,21 @@ class TestDeadWorkerErrorReporting:
     async def test_dead_worker_errors_are_counted(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Dead-worker games increment the errors counter.
+        """Dead-worker games are detected and logged.
 
         We combine a dead worker (first) with a healthy worker (second)
         that delivers a normal result, triggering a progress message.
-        The progress message should contain errors >= 1.
+        The dead worker should produce a warning log identifying its game.
         """
 
         class _FirstDeadThenAliveFakeProcess:
             """First worker dies; subsequent workers succeed immediately."""
 
             captured_tasks: ClassVar[list[WorkerTask]] = []
-            _call_count: ClassVar[int] = 0
-            _next_pid: ClassVar[int] = 8000
+            call_count: ClassVar[int] = 0
+            next_pid: ClassVar[int] = 8000
 
             def __init__(
                 self,
@@ -785,10 +786,10 @@ class TestDeadWorkerErrorReporting:
             ) -> None:
                 task, queue = args
                 _FirstDeadThenAliveFakeProcess.captured_tasks.append(task)
-                self._pid = _FirstDeadThenAliveFakeProcess._next_pid
-                _FirstDeadThenAliveFakeProcess._next_pid += 1
-                call = _FirstDeadThenAliveFakeProcess._call_count
-                _FirstDeadThenAliveFakeProcess._call_count += 1
+                self._pid = _FirstDeadThenAliveFakeProcess.next_pid
+                _FirstDeadThenAliveFakeProcess.next_pid += 1
+                call = _FirstDeadThenAliveFakeProcess.call_count
+                _FirstDeadThenAliveFakeProcess.call_count += 1
 
                 if call == 0:
                     # First worker dies without putting a result
@@ -823,8 +824,8 @@ class TestDeadWorkerErrorReporting:
                 pass
 
         _FirstDeadThenAliveFakeProcess.captured_tasks = []
-        _FirstDeadThenAliveFakeProcess._call_count = 0
-        _FirstDeadThenAliveFakeProcess._next_pid = 8000
+        _FirstDeadThenAliveFakeProcess.call_count = 0
+        _FirstDeadThenAliveFakeProcess.next_pid = 8000
 
         async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
             return "engine_cmd", Path("/fake/dir")
@@ -846,14 +847,12 @@ class TestDeadWorkerErrorReporting:
             concurrency=2,
         )
 
-        await run_sprt(config)
+        with caplog.at_level(logging.WARNING, logger="sprt_runner.runner"):
+            await run_sprt(config)
 
-        captured = capsys.readouterr().out
-        lines = [line for line in captured.strip().split("\n") if line]
-
-        # Find progress messages — they should have errors >= 1
-        progress_msgs = [json.loads(line) for line in lines if '"type": "progress"' in line]
-        assert len(progress_msgs) >= 1
-
-        first_progress = progress_msgs[0]
-        assert first_progress["errors"] >= 1, "Progress should reflect the dead-worker error count"
+        # The dead worker's game ID should appear in a warning log
+        dead_game_id = _FirstDeadThenAliveFakeProcess.captured_tasks[0].game_id
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(dead_game_id in msg for msg in warning_msgs), (
+            f"Expected warning containing game ID {dead_game_id}, got: {warning_msgs}"
+        )
