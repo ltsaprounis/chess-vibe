@@ -454,8 +454,10 @@ async def run_sprt(config: RunConfig) -> None:
             )
             worker.start()
             active_workers.append(worker)
-            assert worker.pid is not None  # guaranteed after start()
-            worker_game_ids[worker.pid] = game_id
+            pid = worker.pid
+            if pid is None:
+                raise RuntimeError("Worker process PID is None after start()")
+            worker_game_ids[pid] = game_id
 
         # Wait for a result from any worker (with timeout for crash safety).
         # Offload the blocking queue.get() to a thread so the asyncio event
