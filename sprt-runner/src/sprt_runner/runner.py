@@ -501,20 +501,20 @@ async def run_sprt(config: RunConfig) -> None:
         if pid_to_remove is not None:
             del worker_game_ids[pid_to_remove]
 
-        # Detect workers that exited without producing any result
-        # (i.e. their PID is gone from active_workers but their game_id
-        # was never consumed from the queue).
+        # Detect workers that have exited and no longer appear in active_workers.
+        # We cannot safely distinguish here between normal and abnormal exits,
+        # and results may still be waiting in the queue, so we only clean up the
+        # bookkeeping and log a warning instead of treating this as a hard error.
         active_pids = {w.pid for w in active_workers}
         for pid in list(worker_game_ids):
             if pid not in active_pids:
                 dead_game_id = worker_game_ids.pop(pid)
-                print(
-                    format_error_message(
-                        f"Worker for game {dead_game_id} died unexpectedly (pid={pid})"
-                    ),
-                    flush=True,
+                logger.warning(
+                    "Worker process for game %s is no longer active (pid=%s); "
+                    "result may already be queued or the worker may have exited early.",
+                    dead_game_id,
+                    pid,
                 )
-                errors += 1
 
         # Handle result
         if worker_result.error is not None:
