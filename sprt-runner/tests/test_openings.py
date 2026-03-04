@@ -66,6 +66,66 @@ class TestLoadEPDOpenings:
         fens = load_epd_openings(epd_path)
         assert len(fens) == 2
 
+    def test_load_epd_strips_bm_operation(self, tmp_path: Path) -> None:
+        """EPD line with bm operation before semicolon should only return FEN."""
+        content = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - bm d5; id "ECO:B00";\n'
+        epd_path = tmp_path / "bm_ops.epd"
+        epd_path.write_text(content)
+        fens = load_epd_openings(epd_path)
+        assert len(fens) == 1
+        assert fens[0] == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    def test_load_epd_strips_multiple_operations(self, tmp_path: Path) -> None:
+        """EPD line with multiple operations should only return FEN."""
+        content = (
+            'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - bm d5; id "test"; ce 30;\n'
+        )
+        epd_path = tmp_path / "multi_ops.epd"
+        epd_path.write_text(content)
+        fens = load_epd_openings(epd_path)
+        assert len(fens) == 1
+        assert fens[0] == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    def test_load_epd_pure_fen_six_fields(self, tmp_path: Path) -> None:
+        """Pure 6-field FEN line should be returned unchanged."""
+        content = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1\n"
+        epd_path = tmp_path / "pure_fen.epd"
+        epd_path.write_text(content)
+        fens = load_epd_openings(epd_path)
+        assert len(fens) == 1
+        assert fens[0] == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    def test_load_epd_four_field_epd(self, tmp_path: Path) -> None:
+        """4-field EPD line should get default halfmove/fullmove counters."""
+        content = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -\n"
+        epd_path = tmp_path / "four_field.epd"
+        epd_path.write_text(content)
+        fens = load_epd_openings(epd_path)
+        assert len(fens) == 1
+        assert fens[0] == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    def test_load_epd_skips_comment_lines(self, tmp_path: Path) -> None:
+        """Comment lines starting with # or % should be skipped."""
+        content = (
+            "# This is a comment\n"
+            "% Another comment\n"
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1\n"
+        )
+        epd_path = tmp_path / "comments.epd"
+        epd_path.write_text(content)
+        fens = load_epd_openings(epd_path)
+        assert len(fens) == 1
+        assert fens[0] == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    def test_load_epd_semicolon_only_operations(self, tmp_path: Path) -> None:
+        """EPD line with operations only after semicolons should still work."""
+        content = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1; e4\n"
+        epd_path = tmp_path / "semi_ops.epd"
+        epd_path.write_text(content)
+        fens = load_epd_openings(epd_path)
+        assert len(fens) == 1
+        assert fens[0] == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
 
 class TestMakeOpeningPairs:
     """Tests for opening pair generation."""
