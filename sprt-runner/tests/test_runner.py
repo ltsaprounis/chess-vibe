@@ -1165,28 +1165,23 @@ class TestSigkillFallback:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When a worker exits promptly after terminate(), kill() is NOT called."""
-        _FakeProcess.captured_tasks = []
-        _FakeProcess._next_pid = 7000
-
-        # Patch kill onto _FakeProcess to track calls
         kill_called: list[int] = []
-        original_fake = _FakeProcess
 
-        class _ObservableFakeProcess(original_fake):  # type: ignore[valid-type,misc]
+        class _PromptFakeProcess(_FakeProcess):
             """_FakeProcess with kill() tracking."""
 
             def kill(self) -> None:
                 kill_called.append(self._pid)
 
-        _ObservableFakeProcess.captured_tasks = []
-        _ObservableFakeProcess._next_pid = 7000
+        _PromptFakeProcess.captured_tasks = []
+        _PromptFakeProcess._next_pid = 7000
 
         async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
             return "engine_cmd", Path("/fake/dir")
 
         monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
         monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
-        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _ObservableFakeProcess)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _PromptFakeProcess)
 
         config = RunConfig(
             base="base-engine",
