@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import multiprocessing
+import shlex
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock
@@ -21,6 +22,7 @@ from sprt_runner.runner import (
     WorkerResult,
     WorkerTask,
     _cleanup_workers,  # type: ignore[reportPrivateUsage]
+    _resolve_run_command,  # type: ignore[reportPrivateUsage]
     build_parser,
     format_complete_message,
     format_error_message,
@@ -67,6 +69,42 @@ class TestParseTimeControl:
     def test_invalid_format(self) -> None:
         with pytest.raises(ValueError, match="Unknown time control"):
             parse_time_control("invalid=5")
+
+
+class TestResolveRunCommand:
+    """Tests for _resolve_run_command with various path formats."""
+
+    def test_path_without_spaces(self) -> None:
+        engine_dir = Path("/home/user/engines/my-engine")
+        result = _resolve_run_command(".venv/bin/python -m engine", engine_dir)
+        parsed = shlex.split(result)
+        assert parsed[0] == "/home/user/engines/my-engine/.venv/bin/python"
+        assert parsed[1:] == ["-m", "engine"]
+
+    def test_path_with_spaces(self) -> None:
+        engine_dir = Path("/Users/My Name/repos/engine")
+        result = _resolve_run_command(".venv/bin/python -m engine", engine_dir)
+        parsed = shlex.split(result)
+        assert parsed[0] == "/Users/My Name/repos/engine/.venv/bin/python"
+        assert parsed[1:] == ["-m", "engine"]
+
+    def test_single_executable_with_spaces(self) -> None:
+        engine_dir = Path("/path/with spaces/engine")
+        result = _resolve_run_command("my_binary", engine_dir)
+        parsed = shlex.split(result)
+        assert parsed == ["/path/with spaces/engine/my_binary"]
+
+    def test_empty_command(self) -> None:
+        result = _resolve_run_command("", Path("/some/dir"))
+        assert result == ""
+
+    def test_roundtrip_shlex_split(self) -> None:
+        """Round-trip: _resolve_run_command output → shlex.split → correct argv."""
+        engine_dir = Path("/Users/My Name/My Projects/chess engine")
+        result = _resolve_run_command(".venv/bin/python -m engine --verbose", engine_dir)
+        argv = shlex.split(result)
+        assert argv[0] == str(engine_dir / ".venv/bin/python")
+        assert argv[1:] == ["-m", "engine", "--verbose"]
 
 
 class TestRunConfig:

@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import multiprocessing
+import shlex
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -227,7 +228,7 @@ def _resolve_run_command(run_cmd: str, engine_dir: Path) -> str:
 
     # Resolve the executable relative to engine_dir
     executable = engine_dir / parts[0]
-    resolved_parts = [str(executable), *parts[1:]]
+    resolved_parts = [shlex.quote(str(executable)), *parts[1:]]
     return " ".join(resolved_parts)
 
 
