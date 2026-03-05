@@ -87,7 +87,7 @@ lint: ## Run all linters, formatters, and type-checkers
 	@cd $(CURDIR) && uvx ruff format --check .
 	@for component in $(PYTHON_COMPONENTS); do \
 		echo "==> Pyright ($$component) ..."; \
-		cd $(CURDIR)/$$component && uv run pyright; \
+		cd $(CURDIR)/$$component && uv run pyright || exit $$?; \
 	done
 	@echo "==> Pyright (engines/random-engine) ..."
 	@cd $(CURDIR)/engines/random-engine && uv run pyright
