@@ -1170,11 +1170,34 @@ class TestSigkillFallback:
         class _PromptFakeProcess(_FakeProcess):
             """_FakeProcess with kill() tracking."""
 
+            next_pid: ClassVar[int] = 7000
+
+            def __init__(
+                self,
+                *,
+                target: object = None,
+                args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+            ) -> None:
+                task, queue = args
+                _PromptFakeProcess.captured_tasks.append(task)
+                queue.put(
+                    WorkerResult(
+                        game_id=task.game_id,
+                        result=GameResult.WHITE_WIN,
+                        termination="checkmate",
+                        move_count=20,
+                        swap_colors=task.swap_colors,
+                    )
+                )
+                self._alive = False
+                self._pid = _PromptFakeProcess.next_pid
+                _PromptFakeProcess.next_pid += 1
+
             def kill(self) -> None:
                 kill_called.append(self._pid)
 
         _PromptFakeProcess.captured_tasks = []
-        _PromptFakeProcess._next_pid = 7000
+        _PromptFakeProcess.next_pid = 7000
 
         async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
             return "engine_cmd", Path("/fake/dir")
