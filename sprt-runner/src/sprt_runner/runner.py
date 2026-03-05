@@ -656,6 +656,13 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
             for w in active_workers:
                 w.terminate()
                 w.join(timeout=5)
+                if w.is_alive():
+                    logger.warning(
+                        "Worker %d did not exit after SIGTERM, sending SIGKILL",
+                        w.pid,
+                    )
+                    w.kill()
+                    w.join(timeout=2)
             break
 
 

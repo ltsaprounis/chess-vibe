@@ -1054,3 +1054,150 @@ class TestWorktreeCleanupAfterSprt:
         await run_sprt(config)
 
         assert cleanup_calls == [Path("/fake/worktree/abc123")]
+
+
+# ---------------------------------------------------------------------------
+# SIGKILL fallback tests
+# ---------------------------------------------------------------------------
+
+
+class _StubbornFakeProcess:
+    """Fake process that ignores SIGTERM (stays alive after terminate+join).
+
+    Puts a result on the queue so SPRT can converge, but ``is_alive()``
+    remains ``True`` after ``terminate()`` until ``kill()`` is called.
+    """
+
+    captured_tasks: ClassVar[list[WorkerTask]] = []
+    next_pid: ClassVar[int] = 11000
+    kill_called: ClassVar[list[int]] = []
+
+    def __init__(
+        self,
+        *,
+        target: object = None,
+        args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+    ) -> None:
+        task, queue = args
+        _StubbornFakeProcess.captured_tasks.append(task)
+        queue.put(
+            WorkerResult(
+                game_id=task.game_id,
+                result=GameResult.WHITE_WIN,
+                termination="checkmate",
+                move_count=20,
+                swap_colors=task.swap_colors,
+            )
+        )
+        self._alive = True
+        self._pid = _StubbornFakeProcess.next_pid
+        _StubbornFakeProcess.next_pid += 1
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+    def start(self) -> None:
+        pass
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+    def terminate(self) -> None:
+        # Intentionally does NOT set self._alive = False
+        pass
+
+    def kill(self) -> None:
+        _StubbornFakeProcess.kill_called.append(self._pid)
+        self._alive = False
+
+
+class TestSigkillFallback:
+    """Verify SIGKILL fallback when workers ignore SIGTERM."""
+
+    @pytest.mark.asyncio
+    async def test_kill_called_when_worker_ignores_sigterm(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """When a worker stays alive after terminate()+join(), kill() is called
+        and a warning is logged."""
+        _StubbornFakeProcess.captured_tasks = []
+        _StubbornFakeProcess.next_pid = 11000
+        _StubbornFakeProcess.kill_called = []
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _StubbornFakeProcess)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+            concurrency=10,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="sprt_runner.runner"):
+            await run_sprt(config)
+
+        # kill() must have been called on at least one worker
+        assert len(_StubbornFakeProcess.kill_called) > 0
+
+        # A warning must have been logged for each force-killed worker
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("SIGKILL" in msg for msg in warning_msgs), (
+            f"Expected warning containing 'SIGKILL', got: {warning_msgs}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_kill_not_called_when_worker_exits_promptly(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When a worker exits promptly after terminate(), kill() is NOT called."""
+        _FakeProcess.captured_tasks = []
+        _FakeProcess._next_pid = 7000
+
+        # Patch kill onto _FakeProcess to track calls
+        kill_called: list[int] = []
+        original_fake = _FakeProcess
+
+        class _ObservableFakeProcess(original_fake):  # type: ignore[valid-type,misc]
+            """_FakeProcess with kill() tracking."""
+
+            def kill(self) -> None:
+                kill_called.append(self._pid)
+
+        _ObservableFakeProcess.captured_tasks = []
+        _ObservableFakeProcess._next_pid = 7000
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _ObservableFakeProcess)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+        )
+
+        await run_sprt(config)
+
+        # kill() must NOT have been called — workers exit promptly
+        assert kill_called == []
