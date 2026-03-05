@@ -21,6 +21,7 @@ from sprt_runner.runner import (
     WorkerResult,
     WorkerTask,
     _cleanup_workers,  # type: ignore[reportPrivateUsage]
+    build_parser,
     format_complete_message,
     format_error_message,
     format_game_result_message,
@@ -28,6 +29,7 @@ from sprt_runner.runner import (
     run_sprt,
     worker_entry,
 )
+from sprt_runner.worktree import EngineSpec
 
 # Re-export for monkeypatching
 _QUEUE_TIMEOUT_SECONDS = "sprt_runner.runner._QUEUE_TIMEOUT_SECONDS"
@@ -408,9 +410,9 @@ class _FakeProcess:
         pass
 
 
-def _mock_parse_engine_spec(_spec: str) -> None:
-    """Mock parse_engine_spec that returns None for any input."""
-    return None
+def _mock_parse_engine_spec(_spec: str) -> EngineSpec:
+    """Mock parse_engine_spec that returns a no-commit EngineSpec."""
+    return EngineSpec(engine_id="mock", commit=None)
 
 
 def _mock_load_openings(_path: Path) -> list[str]:
@@ -856,3 +858,163 @@ class TestDeadWorkerErrorReporting:
         assert any(dead_game_id in msg for msg in warning_msgs), (
             f"Expected warning containing game ID {dead_game_id}, got: {warning_msgs}"
         )
+
+
+class TestRunConfigKeepWorktrees:
+    """Tests for RunConfig keep_worktrees field."""
+
+    def test_keep_worktrees_defaults_false(self) -> None:
+        config = RunConfig(
+            base="random-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=5.0,
+        )
+        assert config.keep_worktrees is False
+
+    def test_keep_worktrees_set_true(self) -> None:
+        config = RunConfig(
+            base="random-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=5.0,
+            keep_worktrees=True,
+        )
+        assert config.keep_worktrees is True
+
+
+class TestKeepWorktreesCLI:
+    """Tests for --keep-worktrees CLI argument."""
+
+    def test_keep_worktrees_flag_absent(self) -> None:
+        """Without --keep-worktrees, the flag should default to False."""
+        parser = build_parser()
+        args = parser.parse_args(["run", "--base", "eng1", "--test", "eng2", "--tc", "depth=1"])
+        assert args.keep_worktrees is False
+
+    def test_keep_worktrees_flag_present(self) -> None:
+        """With --keep-worktrees, the flag should be True."""
+        parser = build_parser()
+        args = parser.parse_args(
+            ["run", "--base", "eng1", "--test", "eng2", "--tc", "depth=1", "--keep-worktrees"]
+        )
+        assert args.keep_worktrees is True
+
+
+class TestWorktreeCleanupAfterSprt:
+    """Tests verifying worktree cleanup after run_sprt() completes."""
+
+    @pytest.mark.asyncio
+    async def test_cleanup_called_after_run_sprt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Worktree cleanup should be called after run_sprt() completes."""
+        _FakeProcess.captured_tasks = []
+        _FakeProcess._next_pid = 7000
+
+        created_worktrees: list[Path] = [Path("/fake/worktree/abc123")]
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        def _mock_collect(base: object, test: object, repo_root: Path) -> list[Path]:
+            return created_worktrees
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _FakeProcess)
+        monkeypatch.setattr("sprt_runner.runner._collect_worktree_paths", _mock_collect)
+
+        cleanup_calls: list[Path] = []
+
+        async def _mock_cleanup(path: Path, *, repo_root: Path) -> None:
+            cleanup_calls.append(path)
+
+        monkeypatch.setattr("sprt_runner.runner.cleanup_worktree", _mock_cleanup)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine:abc123",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+        )
+
+        await run_sprt(config)
+
+        assert cleanup_calls == [Path("/fake/worktree/abc123")]
+
+    @pytest.mark.asyncio
+    async def test_keep_worktrees_skips_cleanup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With keep_worktrees=True, cleanup should not be called."""
+        _FakeProcess.captured_tasks = []
+        _FakeProcess._next_pid = 7000
+
+        created_worktrees: list[Path] = [Path("/fake/worktree/abc123")]
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        def _mock_collect(base: object, test: object, repo_root: Path) -> list[Path]:
+            return created_worktrees
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _FakeProcess)
+        monkeypatch.setattr("sprt_runner.runner._collect_worktree_paths", _mock_collect)
+
+        cleanup_calls: list[Path] = []
+
+        async def _mock_cleanup(path: Path, *, repo_root: Path) -> None:
+            cleanup_calls.append(path)
+
+        monkeypatch.setattr("sprt_runner.runner.cleanup_worktree", _mock_cleanup)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine:abc123",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+            keep_worktrees=True,
+        )
+
+        await run_sprt(config)
+
+        assert cleanup_calls == []
+
+    @pytest.mark.asyncio
+    async def test_cleanup_called_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Worktree cleanup should be called even when run_sprt() exits due to error."""
+        created_worktrees: list[Path] = [Path("/fake/worktree/abc123")]
+
+        async def _failing_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            raise RuntimeError("engine resolution failed")
+
+        def _mock_collect(base: object, test: object, repo_root: Path) -> list[Path]:
+            return created_worktrees
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _failing_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner._collect_worktree_paths", _mock_collect)
+
+        cleanup_calls: list[Path] = []
+
+        async def _mock_cleanup(path: Path, *, repo_root: Path) -> None:
+            cleanup_calls.append(path)
+
+        monkeypatch.setattr("sprt_runner.runner.cleanup_worktree", _mock_cleanup)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine:abc123",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+        )
+
+        await run_sprt(config)
+
+        assert cleanup_calls == [Path("/fake/worktree/abc123")]
