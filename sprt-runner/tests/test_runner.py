@@ -910,7 +910,6 @@ class TestWorktreeCleanupAfterSprt:
     async def test_cleanup_called_after_run_sprt(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Worktree cleanup should be called after run_sprt() completes."""
         _FakeProcess.captured_tasks = []
-        _FakeProcess._next_pid = 7000
 
         created_worktrees: list[Path] = [Path("/fake/worktree/abc123")]
 
@@ -949,7 +948,6 @@ class TestWorktreeCleanupAfterSprt:
     async def test_keep_worktrees_skips_cleanup(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """With keep_worktrees=True, cleanup should not be called."""
         _FakeProcess.captured_tasks = []
-        _FakeProcess._next_pid = 7000
 
         created_worktrees: list[Path] = [Path("/fake/worktree/abc123")]
 
