@@ -38,7 +38,12 @@ from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig, play_game
 from sprt_runner.openings import OpeningPair, load_openings, make_opening_pairs
 from sprt_runner.sprt import SPRTDecision, sprt_test
-from sprt_runner.worktree import parse_engine_spec, resolve_engine_path
+from sprt_runner.worktree import (
+    EngineSpec,
+    cleanup_worktree,
+    parse_engine_spec,
+    resolve_engine_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +74,7 @@ class RunConfig:
         concurrency: Number of concurrent game worker processes.
         adjudication: Adjudication configuration.
         repo_root: Root of the git repository.
+        keep_worktrees: If True, preserve worktrees after test completes.
     """
 
     base: str
@@ -82,6 +88,7 @@ class RunConfig:
     concurrency: int = 1
     adjudication: AdjudicationConfig = field(default_factory=AdjudicationConfig)
     repo_root: Path = field(default_factory=lambda: Path.cwd())
+    keep_worktrees: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +366,28 @@ def _cleanup_workers(
     return still_alive
 
 
+def _collect_worktree_paths(
+    base_spec: EngineSpec, test_spec: EngineSpec, repo_root: Path
+) -> list[Path]:
+    """Return the list of worktree paths that would be created for the given specs.
+
+    Args:
+        base_spec: Parsed base engine specification.
+        test_spec: Parsed test engine specification.
+        repo_root: Path to the git repository root.
+
+    Returns:
+        List of worktree paths (may be empty if neither spec uses a commit).
+    """
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for spec in (base_spec, test_spec):
+        if spec.commit is not None and spec.commit not in seen:
+            seen.add(spec.commit)
+            paths.append(repo_root / ".worktrees" / spec.commit)
+    return paths
+
+
 async def run_sprt(config: RunConfig) -> None:
     """Run a complete SPRT test.
 
@@ -368,6 +397,9 @@ async def run_sprt(config: RunConfig) -> None:
     to stdout. Workers report via ``multiprocessing.Queue``; the
     coordinator aggregates single-threaded.
 
+    Worktrees created during engine resolution are cleaned up after the
+    test completes (or fails), unless ``config.keep_worktrees`` is True.
+
     Args:
         config: Run configuration.
     """
@@ -375,6 +407,28 @@ async def run_sprt(config: RunConfig) -> None:
     base_spec = parse_engine_spec(config.base)
     test_spec = parse_engine_spec(config.test)
 
+    # Determine which worktree paths may be created so we can clean them up later
+    worktree_paths = _collect_worktree_paths(base_spec, test_spec, config.repo_root)
+
+    try:
+        await _run_sprt_inner(config, base_spec, test_spec)
+    finally:
+        if not config.keep_worktrees:
+            for wt_path in worktree_paths:
+                await cleanup_worktree(wt_path, repo_root=config.repo_root)
+
+
+async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: EngineSpec) -> None:
+    """Execute the core SPRT loop.
+
+    Extracted from ``run_sprt`` so the outer function can wrap it in a
+    ``try``/``finally`` block for worktree cleanup.
+
+    Args:
+        config: Run configuration.
+        base_spec: Parsed base engine specification.
+        test_spec: Parsed test engine specification.
+    """
     try:
         base_run, base_dir = await resolve_engine_path(base_spec, repo_root=config.repo_root)
         test_run, test_dir = await resolve_engine_path(test_spec, repo_root=config.repo_root)
@@ -641,6 +695,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--adjudicate-draw", type=int, default=10, help="Draw adjudication threshold (cp)"
     )
+    run_parser.add_argument(
+        "--keep-worktrees",
+        action="store_true",
+        default=False,
+        help="Preserve git worktrees after test completes (for debugging)",
+    )
 
     return parser
 
@@ -683,6 +743,7 @@ def main() -> None:
         book_path=Path(args.book) if args.book else None,
         concurrency=args.concurrency,
         adjudication=adjudication,
+        keep_worktrees=args.keep_worktrees,
     )
 
     asyncio.run(run_sprt(run_config))

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -9,6 +11,7 @@ import pytest
 from sprt_runner.worktree import (
     EngineSpec,
     WorktreeError,
+    cleanup_worktree,
     parse_engine_spec,
     resolve_engine_path,
 )
@@ -218,3 +221,84 @@ class TestResolveEnginePath:
         spec = EngineSpec(engine_id="test", commit=None)
         with pytest.raises(WorktreeError, match="Cannot read registry"):
             await resolve_engine_path(spec, repo_root=tmp_path)
+
+
+class TestCleanupWorktree:
+    """Tests for worktree cleanup."""
+
+    @pytest.mark.asyncio
+    async def test_cleanup_runs_git_worktree_remove(self, tmp_path: Path) -> None:
+        """cleanup_worktree should run git worktree remove --force."""
+        worktree_path = tmp_path / ".worktrees" / "abc123"
+        worktree_path.mkdir(parents=True, exist_ok=True)
+
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate = AsyncMock(return_value=(b"", b""))
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
+            await cleanup_worktree(worktree_path, repo_root=tmp_path)
+
+            mock_exec.assert_called_once_with(
+                "git",
+                "worktree",
+                "remove",
+                "--force",
+                str(worktree_path),
+                cwd=str(tmp_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+    @pytest.mark.asyncio
+    async def test_cleanup_logs_warning_on_failure(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Failed worktree removal should log a warning, not raise."""
+        worktree_path = tmp_path / ".worktrees" / "abc123"
+        worktree_path.mkdir(parents=True, exist_ok=True)
+
+        mock_process = AsyncMock()
+        mock_process.returncode = 1
+        mock_process.communicate = AsyncMock(return_value=(b"", b"removal failed"))
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
+            with caplog.at_level(logging.WARNING):
+                await cleanup_worktree(worktree_path, repo_root=tmp_path)
+
+        assert any("Failed to remove worktree" in msg for msg in caplog.messages)
+
+    @pytest.mark.asyncio
+    async def test_cleanup_logs_warning_on_exception(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Unexpected exceptions during cleanup should be caught and logged."""
+        worktree_path = tmp_path / ".worktrees" / "abc123"
+        worktree_path.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch(
+                "asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                side_effect=OSError("git not found"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            await cleanup_worktree(worktree_path, repo_root=tmp_path)
+
+        assert any("Failed to remove worktree" in msg for msg in caplog.messages)
+
+    @pytest.mark.asyncio
+    async def test_cleanup_nonexistent_path_is_noop(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Cleaning up a path that doesn't exist should be a no-op."""
+        worktree_path = tmp_path / ".worktrees" / "nonexistent"
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            with caplog.at_level(logging.DEBUG):
+                await cleanup_worktree(worktree_path, repo_root=tmp_path)
+
+            mock_exec.assert_not_called()

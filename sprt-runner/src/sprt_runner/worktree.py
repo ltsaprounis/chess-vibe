@@ -201,3 +201,42 @@ async def resolve_engine_path(
         await _build_engine(engine_dir, entry.build)
 
     return entry.run, engine_dir
+
+
+async def cleanup_worktree(worktree_path: Path, *, repo_root: Path) -> None:
+    """Remove a git worktree (best-effort).
+
+    If the worktree path does not exist, this is a no-op. If removal fails
+    (non-zero exit code or unexpected exception), a warning is logged but
+    the error is not propagated.
+
+    Args:
+        worktree_path: Path to the worktree directory.
+        repo_root: Path to the git repository root.
+    """
+    if not worktree_path.exists():
+        logger.debug("Worktree path does not exist, skipping cleanup: %s", worktree_path)
+        return
+
+    logger.info("Removing worktree at %s", worktree_path)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree_path),
+            cwd=str(repo_root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            logger.warning(
+                "Failed to remove worktree at %s: %s",
+                worktree_path,
+                stderr.decode().strip(),
+            )
+    except Exception:
+        logger.warning("Failed to remove worktree at %s", worktree_path, exc_info=True)
