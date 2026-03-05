@@ -419,7 +419,16 @@ async def run_sprt(config: RunConfig) -> None:
 
 
 async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: EngineSpec) -> None:
-    """Core SPRT loop (extracted so run_sprt can wrap with try/finally)."""
+    """Execute the core SPRT loop.
+
+    Extracted from ``run_sprt`` so the outer function can wrap it in a
+    ``try``/``finally`` block for worktree cleanup.
+
+    Args:
+        config: Run configuration.
+        base_spec: Parsed base engine specification.
+        test_spec: Parsed test engine specification.
+    """
     try:
         base_run, base_dir = await resolve_engine_path(base_spec, repo_root=config.repo_root)
         test_run, test_dir = await resolve_engine_path(test_spec, repo_root=config.repo_root)
