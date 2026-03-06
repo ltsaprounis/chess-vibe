@@ -7,11 +7,47 @@ subprocesses managed by :class:`backend.services.sprt_service.SPRTService`.
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
+from shared.storage.models import SPRTStatus, SPRTTestFilter
 
 from backend.converters import sprt_test_to_response
 from backend.models import SPRTTestCreatedResponse, SPRTTestCreateRequest, SPRTTestResponse
 
 router = APIRouter(prefix="/sprt/tests", tags=["sprt"])
+
+
+@router.get("", response_model=list[SPRTTestResponse])
+def list_sprt_tests(
+    request: Request,
+    status: str | None = None,
+    engine_id: str | None = None,
+) -> list[SPRTTestResponse]:
+    """List all SPRT tests with optional filtering.
+
+    Args:
+        request: FastAPI request.
+        status: Filter by test status (``running``, ``completed``, ``cancelled``).
+        engine_id: Filter by engine (matches either engine_a or engine_b).
+
+    Returns:
+        List of SPRT tests matching the filter criteria.
+    """
+    sprt_filter: SPRTTestFilter | None = None
+    if status is not None or engine_id is not None:
+        parsed_status: SPRTStatus | None = None
+        if status is not None:
+            try:
+                parsed_status = SPRTStatus(status)
+            except ValueError as err:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid status '{status}'. "
+                    "Must be one of: running, completed, cancelled",
+                ) from err
+        sprt_filter = SPRTTestFilter(status=parsed_status, engine_id=engine_id)
+
+    repo = request.app.state.sprt_repo
+    tests = repo.list_sprt_tests(sprt_filter)
+    return [sprt_test_to_response(t) for t in tests]
 
 
 @router.post("", response_model=SPRTTestCreatedResponse, status_code=201)
