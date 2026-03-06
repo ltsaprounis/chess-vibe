@@ -96,7 +96,7 @@ def create_app(
     )
 
     # Dependencies
-    effective_data_dir = data_dir or _DEFAULT_DATA_DIR
+    effective_data_dir = (data_dir or _DEFAULT_DATA_DIR).resolve()
     repo_root = get_repo_root()
     effective_runner_python = runner_python or str(repo_root / _DEFAULT_RUNNER_PYTHON)
 
@@ -109,6 +109,7 @@ def create_app(
         sprt_repo,
         runner_python=effective_runner_python,
         repo_root=repo_root,
+        data_dir=effective_data_dir,
     )
 
     # Store on app.state for access in route handlers

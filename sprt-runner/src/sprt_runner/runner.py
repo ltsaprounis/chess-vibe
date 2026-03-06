@@ -28,9 +28,11 @@ import signal
 import sys
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
-from shared.storage.models import GameResult
+from shared.storage.models import Game, GameResult, Move
+from shared.storage.pgn_export import export_game_to_pgn
 from shared.time_control import (
     TimeControl,
     parse_time_control,
@@ -92,6 +94,8 @@ class RunConfig:
     adjudication: AdjudicationConfig = field(default_factory=AdjudicationConfig)
     repo_root: Path = field(default_factory=lambda: Path.cwd())
     keep_worktrees: bool = False
+    output_dir: Path | None = None
+    test_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +230,89 @@ def format_interrupted_message(games_played: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Game persistence helpers
+# ---------------------------------------------------------------------------
+
+
+def _write_game(output_dir: Path, game: Game) -> None:
+    """Write a game's eval JSON and PGN to *output_dir*.
+
+    Args:
+        output_dir: Directory to write files into.
+        game: The game to persist.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    eval_path = output_dir / f"{game.id}.eval.json"
+    eval_path.write_text(
+        json.dumps(_game_to_dict(game), indent=2),
+        encoding="utf-8",
+    )
+
+    pgn_path = output_dir / f"{game.id}.pgn"
+    pgn_path.write_text(export_game_to_pgn(game), encoding="utf-8")
+
+
+def _game_to_dict(game: Game) -> dict[str, object]:
+    """Serialise a :class:`Game` to a JSON-compatible dict."""
+    return {
+        "id": game.id,
+        "white_engine": game.white_engine,
+        "black_engine": game.black_engine,
+        "result": game.result.value,
+        "opening_name": game.opening_name,
+        "sprt_test_id": game.sprt_test_id,
+        "start_fen": game.start_fen,
+        "time_control": _tc_to_dict(game.time_control) if game.time_control else None,
+        "created_at": game.created_at.isoformat(),
+        "moves": [
+            {
+                "uci": m.uci,
+                "san": m.san,
+                "fen_after": m.fen_after,
+                "score_cp": m.score_cp,
+                "score_mate": m.score_mate,
+                "depth": m.depth,
+                "seldepth": m.seldepth,
+                "pv": m.pv,
+                "nodes": m.nodes,
+                "time_ms": m.time_ms,
+                "clock_white_ms": m.clock_white_ms,
+                "clock_black_ms": m.clock_black_ms,
+            }
+            for m in game.moves
+        ],
+    }
+
+
+def _tc_to_dict(tc: object) -> dict[str, object]:
+    """Serialise a time control to a JSON-compatible dict."""
+    from shared.time_control import (
+        DepthTimeControl,
+        FixedTimeControl,
+        IncrementTimeControl,
+        NodesTimeControl,
+    )
+
+    if isinstance(tc, FixedTimeControl):
+        return {"type": "fixed_time", "movetime_ms": tc.movetime_ms}
+    if isinstance(tc, IncrementTimeControl):
+        return {
+            "type": "increment",
+            "wtime_ms": tc.wtime_ms,
+            "btime_ms": tc.btime_ms,
+            "winc_ms": tc.winc_ms,
+            "binc_ms": tc.binc_ms,
+            "moves_to_go": tc.moves_to_go,
+        }
+    if isinstance(tc, DepthTimeControl):
+        return {"type": "depth", "depth": tc.depth}
+    if isinstance(tc, NodesTimeControl):
+        return {"type": "nodes", "nodes": tc.nodes}
+    raise TypeError(f"Unknown time control type: {type(tc)}")
+
+
+# ---------------------------------------------------------------------------
 # SPRT orchestration
 # ---------------------------------------------------------------------------
 
@@ -297,6 +384,8 @@ class WorkerResult:
     move_count: int
     swap_colors: bool
     error: str | None = None
+    moves: list[Move] = field(default_factory=list[Move])
+    start_fen: str | None = None
 
 
 async def _play_single_game(task: WorkerTask) -> WorkerResult:
@@ -332,6 +421,8 @@ async def _play_single_game(task: WorkerTask) -> WorkerResult:
             termination=outcome.termination.value,
             move_count=len(outcome.moves),
             swap_colors=task.swap_colors,
+            moves=outcome.moves,
+            start_fen=outcome.start_fen,
         )
     except Exception as e:
         return WorkerResult(
@@ -520,6 +611,11 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
     games_played = 0
     pair_index = 0
 
+    # Game persistence — save games when output_dir is provided
+    output_dir = config.output_dir
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
     # Result queue for IPC from worker processes
     result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
 
@@ -690,6 +786,34 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                 flush=True,
             )
 
+            # Persist game if storage is configured
+            if output_dir is not None:
+                # Determine engine names for white/black based on colour swap
+                if worker_result.swap_colors:
+                    white_engine = config.test
+                    black_engine = config.base
+                else:
+                    white_engine = config.base
+                    black_engine = config.test
+
+                game = Game(
+                    id=worker_result.game_id,
+                    white_engine=white_engine,
+                    black_engine=black_engine,
+                    result=worker_result.result,
+                    moves=worker_result.moves,
+                    created_at=datetime.now(UTC),
+                    sprt_test_id=config.test_id,
+                    start_fen=worker_result.start_fen,
+                    time_control=config.time_control,
+                )
+                try:
+                    _write_game(output_dir, game)
+                except Exception:
+                    logger.exception(
+                        "Failed to persist game %s", worker_result.game_id
+                    )
+
             # SPRT check
             sprt_result = sprt_test(
                 wins=wins,
@@ -810,6 +934,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Preserve git worktrees after test completes (for debugging)",
     )
+    run_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to write game files (.eval.json + .pgn) into",
+    )
+    run_parser.add_argument(
+        "--test-id",
+        type=str,
+        default=None,
+        help="SPRT test ID stamped into each game record for filtering",
+    )
 
     return parser
 
@@ -853,6 +989,8 @@ def main() -> None:
         concurrency=args.concurrency,
         adjudication=adjudication,
         keep_worktrees=args.keep_worktrees,
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        test_id=args.test_id,
     )
 
     try:

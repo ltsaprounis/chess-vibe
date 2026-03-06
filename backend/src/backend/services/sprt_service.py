@@ -80,6 +80,7 @@ class SPRTService:
         *,
         runner_python: str = "python",
         repo_root: Path | None = None,
+        data_dir: Path | None = None,
     ) -> None:
         """Initialise the service.
 
@@ -89,10 +90,13 @@ class SPRTService:
                 sprt-runner virtualenv (e.g.
                 ``"sprt-runner/.venv/bin/python"``).
             repo_root: Root of the repository for resolving paths.
+            data_dir: Root data directory. When set, game files are
+                written to ``data_dir/sprt-tests/{test_id}/games/``.
         """
         self._test_repo = test_repo
         self._runner_python = runner_python
         self._repo_root = repo_root or Path.cwd()
+        self._data_dir = data_dir
         self._running: dict[str, _RunningTest] = {}
 
     @property
@@ -170,6 +174,10 @@ class SPRTService:
         ]
         if book_path is not None:
             cmd.extend(["--book", book_path])
+        if self._data_dir is not None:
+            games_dir = self._data_dir / "sprt-tests" / test_id / "games"
+            cmd.extend(["--output-dir", str(games_dir)])
+            cmd.extend(["--test-id", test_id])
 
         process = await asyncio.create_subprocess_exec(
             *cmd,

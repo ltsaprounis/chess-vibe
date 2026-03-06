@@ -12,7 +12,7 @@ from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
-from shared.storage.models import GameResult
+from shared.storage.models import Game, GameResult, Move
 from shared.time_control import DepthTimeControl, FixedTimeControl, parse_time_control
 from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig
@@ -228,6 +228,41 @@ class TestWorkerResult:
         )
         assert result.result is None
         assert result.error == "Engine crashed"
+
+    def test_result_carries_moves(self) -> None:
+        moves = [
+            Move(
+                uci="e2e4",
+                san="e4",
+                fen_after="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+                score_cp=30,
+                depth=10,
+            ),
+        ]
+        result = WorkerResult(
+            game_id="game-3",
+            result=GameResult.DRAW,
+            termination="draw_rule",
+            move_count=1,
+            swap_colors=False,
+            moves=moves,
+            start_fen=None,
+        )
+        assert len(result.moves) == 1
+        assert result.moves[0].uci == "e2e4"
+
+    def test_result_carries_start_fen(self) -> None:
+        fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+        result = WorkerResult(
+            game_id="game-4",
+            result=GameResult.WHITE_WIN,
+            termination="checkmate",
+            move_count=0,
+            swap_colors=False,
+            moves=[],
+            start_fen=fen,
+        )
+        assert result.start_fen == fen
 
 
 class TestWorkerTask:
@@ -572,6 +607,128 @@ class TestColorAssignmentWithBook:
                 f"got {task.swap_colors}"
             )
             assert task.game_config.start_fen == expected_pair.fen
+
+
+class _FakeProcessWithMoves:
+    """Fake process that includes moves in WorkerResult for game persistence tests."""
+
+    captured_tasks: ClassVar[list[WorkerTask]] = []
+    _next_pid: ClassVar[int] = 9000
+
+    _test_moves: ClassVar[list[Move]] = [
+        Move(
+            uci="e2e4",
+            san="e4",
+            fen_after="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            score_cp=30,
+            depth=10,
+        ),
+    ]
+
+    def __init__(
+        self,
+        *,
+        target: object = None,
+        args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+    ) -> None:
+        task, q = args
+        _FakeProcessWithMoves.captured_tasks.append(task)
+        q.put(
+            WorkerResult(
+                game_id=task.game_id,
+                result=GameResult.WHITE_WIN,
+                termination="checkmate",
+                move_count=1,
+                swap_colors=task.swap_colors,
+                moves=list(_FakeProcessWithMoves._test_moves),
+                start_fen=task.game_config.start_fen,
+            )
+        )
+        self._pid = _FakeProcessWithMoves._next_pid
+        _FakeProcessWithMoves._next_pid += 1
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+    def start(self) -> None:
+        pass
+
+    def is_alive(self) -> bool:
+        return False
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+    def terminate(self) -> None:
+        pass
+
+
+class TestGamePersistence:
+    """Tests verifying games are saved to the output directory during SPRT runs."""
+
+    @pytest.mark.asyncio
+    async def test_games_saved_when_output_dir_set(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Games should be persisted as .eval.json + .pgn when output_dir is set."""
+        _FakeProcessWithMoves.captured_tasks = []
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _FakeProcessWithMoves)
+
+        games_dir = tmp_path / "games"
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+            output_dir=games_dir,
+        )
+
+        await run_sprt(config)
+
+        # Verify game files were created
+        assert games_dir.is_dir()
+
+        eval_files = list(games_dir.glob("*.eval.json"))
+        pgn_files = list(games_dir.glob("*.pgn"))
+        assert len(eval_files) >= 1, "At least one .eval.json should be saved"
+        assert len(pgn_files) >= 1, "At least one .pgn should be saved"
+
+    @pytest.mark.asyncio
+    async def test_no_games_saved_when_output_dir_is_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Games should NOT be persisted when output_dir is not set."""
+        _FakeProcessWithMoves.captured_tasks = []
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _FakeProcessWithMoves)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+        )
+
+        await run_sprt(config)
+
+        # No data directory should be created
+        assert not (tmp_path / "games").exists()
 
 
 class _SlowFakeProcess:
@@ -1123,6 +1280,25 @@ class TestKeepWorktreesCLI:
             ["run", "--base", "eng1", "--test", "eng2", "--tc", "depth=1", "--keep-worktrees"]
         )
         assert args.keep_worktrees is True
+
+
+class TestOutputDirCLI:
+    """Tests for --output-dir CLI argument."""
+
+    def test_output_dir_absent(self) -> None:
+        """Without --output-dir, the flag should default to None."""
+        parser = build_parser()
+        args = parser.parse_args(["run", "--base", "eng1", "--test", "eng2", "--tc", "depth=1"])
+        assert args.output_dir is None
+
+    def test_output_dir_present(self) -> None:
+        """With --output-dir, the value should be set."""
+        parser = build_parser()
+        args = parser.parse_args(
+            ["run", "--base", "eng1", "--test", "eng2", "--tc", "depth=1",
+             "--output-dir", "/tmp/games"]
+        )
+        assert args.output_dir == "/tmp/games"
 
 
 class TestWorktreeCleanupAfterSprt:
