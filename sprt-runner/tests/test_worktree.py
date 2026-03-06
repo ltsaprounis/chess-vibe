@@ -120,6 +120,8 @@ class TestCreateWorktree:
             await _create_worktree(tmp_path, "abc123")
 
         assert any("Stale worktree" in msg for msg in caplog.messages)
+        # The leftover file from the stale directory should have been removed
+        assert not (worktree_path / "leftover_file.txt").exists()
 
     @pytest.mark.asyncio
     async def test_stale_directory_recreation_failure_raises(self, tmp_path: Path) -> None:
