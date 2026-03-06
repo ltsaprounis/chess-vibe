@@ -181,7 +181,11 @@ async def play_game(
         try:
             tablebase = chess.syzygy.open_tablebase(str(config.adjudication.syzygy_path))
         except Exception:
-            logger.warning("Failed to open Syzygy tablebase", exc_info=True)
+            logger.warning(
+                "Failed to open Syzygy tablebase at %s",
+                config.adjudication.syzygy_path,
+                exc_info=True,
+            )
 
     try:
         return await _play_game_loop(white=white, black=black, config=config, tablebase=tablebase)
