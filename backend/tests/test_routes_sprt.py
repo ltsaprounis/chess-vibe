@@ -59,6 +59,41 @@ class TestSPRTRoutes:
         assert data["wins"] == 5
         assert data["losses"] == 3
 
+    def test_list_sprt_tests_empty(self, client: TestClient) -> None:
+        resp = client.get("/api/sprt/tests")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_list_sprt_tests_returns_saved_tests(
+        self,
+        client: TestClient,
+        sprt_repo: FileSPRTTestRepository,
+    ) -> None:
+        test = SPRTTest(
+            id="test-list-1",
+            engine_a="engine-a",
+            engine_b="engine-b",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=5.0,
+            alpha=0.05,
+            beta=0.05,
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            status=SPRTStatus.RUNNING,
+            wins=5,
+            losses=3,
+            draws=2,
+            llr=0.5,
+        )
+        sprt_repo.save_sprt_test(test)
+
+        resp = client.get("/api/sprt/tests")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["id"] == "test-list-1"
+        assert data[0]["status"] == "running"
+
     def test_get_sprt_test_not_found(self, client: TestClient) -> None:
         resp = client.get("/api/sprt/tests/nonexistent")
         assert resp.status_code == 404

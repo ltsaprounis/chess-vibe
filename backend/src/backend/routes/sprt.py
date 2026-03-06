@@ -49,6 +49,17 @@ async def create_sprt_test(
     return SPRTTestCreatedResponse(id=test_id, status="running")
 
 
+@router.get("", response_model=list[SPRTTestResponse])
+def list_sprt_tests(request: Request) -> list[SPRTTestResponse]:
+    """List all SPRT tests.
+
+    Returns:
+        All SPRT tests, most recent first.
+    """
+    tests = request.app.state.sprt_repo.list_sprt_tests()
+    return [sprt_test_to_response(t) for t in tests]
+
+
 @router.get("/{test_id}", response_model=SPRTTestResponse)
 def get_sprt_test(test_id: str, request: Request) -> SPRTTestResponse:
     """Retrieve SPRT test status.

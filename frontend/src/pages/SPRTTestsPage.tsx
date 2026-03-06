@@ -54,6 +54,14 @@ interface LiveProgress {
 }
 
 // ---------------------------------------------------------------------------
+// Help text component
+// ---------------------------------------------------------------------------
+
+function HelpText({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return <p className="mt-1 text-xs text-gray-500">{children}</p>
+}
+
+// ---------------------------------------------------------------------------
 // Form validation
 // ---------------------------------------------------------------------------
 
@@ -136,7 +144,9 @@ export function SPRTTestsPage(): React.JSX.Element {
   // Form state
   const [showForm, setShowForm] = useState(false)
   const [engineA, setEngineA] = useState('')
+  const [commitA, setCommitA] = useState('')
   const [engineB, setEngineB] = useState('')
+  const [commitB, setCommitB] = useState('')
   const [timeControl, setTimeControl] = useState('movetime=1000')
   const [elo0, setElo0] = useState(0)
   const [elo1, setElo1] = useState(5)
@@ -274,11 +284,14 @@ export function SPRTTestsPage(): React.JSX.Element {
     setFormErrors(errors)
     if (Object.keys(errors).length > 0) return
 
+    const engineASpec = commitA.trim() ? `${engineA}:${commitA.trim()}` : engineA
+    const engineBSpec = commitB.trim() ? `${engineB}:${commitB.trim()}` : engineB
+
     setSubmitting(true)
     try {
       const created = await createSPRTTest({
-        engine_a: engineA,
-        engine_b: engineB,
+        engine_a: engineASpec,
+        engine_b: engineBSpec,
         time_control: timeControl,
         elo0,
         elo1,
@@ -327,7 +340,7 @@ export function SPRTTestsPage(): React.JSX.Element {
       setError(err instanceof Error ? err.message : 'Failed to create test')
       setSubmitting(false)
     }
-  }, [engineA, engineB, timeControl, elo0, elo1, alpha, beta, selectedBook, concurrency])
+  }, [engineA, commitA, engineB, commitB, timeControl, elo0, elo1, alpha, beta, selectedBook, concurrency])
 
   // -----------------------------------------------------------------------
   // Render
@@ -385,6 +398,24 @@ export function SPRTTestsPage(): React.JSX.Element {
               {formErrors.engineA && (
                 <p className="mt-1 text-xs text-red-400">{formErrors.engineA}</p>
               )}
+              <HelpText>Base engine to test against (the &quot;baseline&quot;).</HelpText>
+            </div>
+
+            <div>
+              <label htmlFor="commitA" className="mb-1 block text-sm text-gray-300">
+                Commit (Engine A)
+              </label>
+              <input
+                id="commitA"
+                type="text"
+                placeholder="e.g. abc123 or HEAD~1"
+                className="w-full rounded bg-gray-700 px-3 py-2 text-white placeholder-gray-500"
+                value={commitA}
+                onChange={(e) => setCommitA(e.target.value)}
+              />
+              <HelpText>
+                Optional git commit SHA or ref. Leave blank to use the current working tree.
+              </HelpText>
             </div>
 
             <div>
@@ -407,6 +438,24 @@ export function SPRTTestsPage(): React.JSX.Element {
               {formErrors.engineB && (
                 <p className="mt-1 text-xs text-red-400">{formErrors.engineB}</p>
               )}
+              <HelpText>Engine under test (the &quot;challenger&quot;).</HelpText>
+            </div>
+
+            <div>
+              <label htmlFor="commitB" className="mb-1 block text-sm text-gray-300">
+                Commit (Engine B)
+              </label>
+              <input
+                id="commitB"
+                type="text"
+                placeholder="e.g. def456 or HEAD"
+                className="w-full rounded bg-gray-700 px-3 py-2 text-white placeholder-gray-500"
+                value={commitB}
+                onChange={(e) => setCommitB(e.target.value)}
+              />
+              <HelpText>
+                Optional git commit SHA or ref. Leave blank to use the current working tree.
+              </HelpText>
             </div>
 
             <div>
@@ -423,6 +472,12 @@ export function SPRTTestsPage(): React.JSX.Element {
               {formErrors.timeControl && (
                 <p className="mt-1 text-xs text-red-400">{formErrors.timeControl}</p>
               )}
+              <HelpText>
+                Format: <code className="text-gray-400">movetime=MS</code>,{' '}
+                <code className="text-gray-400">wtime=MS btime=MS winc=MS binc=MS</code>,{' '}
+                <code className="text-gray-400">depth=N</code>, or{' '}
+                <code className="text-gray-400">nodes=N</code>.
+              </HelpText>
             </div>
 
             <div>
@@ -442,6 +497,9 @@ export function SPRTTestsPage(): React.JSX.Element {
                   </option>
                 ))}
               </select>
+              <HelpText>
+                EPD or PGN opening book. Each opening is played twice with swapped colours.
+              </HelpText>
             </div>
 
             <div>
@@ -455,6 +513,10 @@ export function SPRTTestsPage(): React.JSX.Element {
                 value={elo0}
                 onChange={(e) => setElo0(Number(e.target.value))}
               />
+              <HelpText>
+                Null hypothesis Elo difference (H0). SPRT stops and accepts H0 if the true Elo gain
+                is ≤ this value. Typically 0.
+              </HelpText>
             </div>
 
             <div>
@@ -469,6 +531,10 @@ export function SPRTTestsPage(): React.JSX.Element {
                 onChange={(e) => setElo1(Number(e.target.value))}
               />
               {formErrors.elo && <p className="mt-1 text-xs text-red-400">{formErrors.elo}</p>}
+              <HelpText>
+                Alternative hypothesis Elo gain (H1). SPRT stops and accepts H1 if the true Elo gain
+                is ≥ this value. Must be greater than Elo0.
+              </HelpText>
             </div>
 
             <div>
@@ -484,6 +550,10 @@ export function SPRTTestsPage(): React.JSX.Element {
                 onChange={(e) => setAlpha(Number(e.target.value))}
               />
               {formErrors.alpha && <p className="mt-1 text-xs text-red-400">{formErrors.alpha}</p>}
+              <HelpText>
+                Type I error rate — probability of accepting H1 when H0 is true (false positive).
+                Lower = more games. Typical: 0.05.
+              </HelpText>
             </div>
 
             <div>
@@ -499,6 +569,10 @@ export function SPRTTestsPage(): React.JSX.Element {
                 onChange={(e) => setBeta(Number(e.target.value))}
               />
               {formErrors.beta && <p className="mt-1 text-xs text-red-400">{formErrors.beta}</p>}
+              <HelpText>
+                Type II error rate — probability of accepting H0 when H1 is true (false negative).
+                Lower = more games. Typical: 0.05.
+              </HelpText>
             </div>
 
             <div>
@@ -513,6 +587,9 @@ export function SPRTTestsPage(): React.JSX.Element {
                 value={concurrency}
                 onChange={(e) => setConcurrency(Number(e.target.value))}
               />
+              <HelpText>
+                Number of games to play in parallel. Each worker runs one game at a time.
+              </HelpText>
             </div>
           </div>
 

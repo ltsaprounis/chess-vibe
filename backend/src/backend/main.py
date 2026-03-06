@@ -19,6 +19,7 @@ from shared.storage.file_store import (
     FileOpeningBookRepository,
     FileSPRTTestRepository,
 )
+from shared.utils import get_repo_root
 
 from backend.routes import engines, games, openings, sprt
 from backend.services.engine_pool import EnginePool
@@ -96,7 +97,8 @@ def create_app(
 
     # Dependencies
     effective_data_dir = data_dir or _DEFAULT_DATA_DIR
-    effective_runner_python = runner_python or _DEFAULT_RUNNER_PYTHON
+    repo_root = get_repo_root()
+    effective_runner_python = runner_python or str(repo_root / _DEFAULT_RUNNER_PYTHON)
 
     game_repo = FileGameRepository(effective_data_dir)
     sprt_repo = FileSPRTTestRepository(effective_data_dir)
@@ -106,6 +108,7 @@ def create_app(
     sprt_service = SPRTService(
         sprt_repo,
         runner_python=effective_runner_python,
+        repo_root=repo_root,
     )
 
     # Store on app.state for access in route handlers

@@ -188,6 +188,8 @@ describe('SPRTTestsPage', () => {
     expect(screen.getByText('Create SPRT Test')).toBeInTheDocument()
     expect(screen.getByLabelText('Engine A')).toBeInTheDocument()
     expect(screen.getByLabelText('Engine B')).toBeInTheDocument()
+    expect(screen.getByLabelText('Commit (Engine A)')).toBeInTheDocument()
+    expect(screen.getByLabelText('Commit (Engine B)')).toBeInTheDocument()
     expect(screen.getByLabelText('Time Control')).toBeInTheDocument()
     expect(screen.getByLabelText('Elo0')).toBeInTheDocument()
     expect(screen.getByLabelText('Elo1')).toBeInTheDocument()
@@ -198,6 +200,20 @@ describe('SPRTTestsPage', () => {
 
     await userEvent.click(screen.getByText('Close Form'))
     expect(screen.queryByText('Create SPRT Test')).not.toBeInTheDocument()
+  })
+
+  it('shows help text for form fields', async () => {
+    render(<SPRTTestsPage />)
+    await waitFor(() => expect(screen.getByText('New Test')).toBeInTheDocument())
+
+    await userEvent.click(screen.getByText('New Test'))
+
+    // Check a few key help texts are visible
+    expect(screen.getByText(/Base engine to test against/)).toBeInTheDocument()
+    expect(screen.getByText(/Engine under test/)).toBeInTheDocument()
+    expect(screen.getAllByText(/Optional git commit SHA/).length).toBe(2)
+    expect(screen.getByText(/Null hypothesis Elo difference/)).toBeInTheDocument()
+    expect(screen.getByText(/Alternative hypothesis Elo gain/)).toBeInTheDocument()
   })
 
   it('populates engine dropdowns with fetched engines', async () => {
@@ -308,6 +324,31 @@ describe('SPRTTestsPage', () => {
         book_path: null,
         concurrency: 1,
       })
+    })
+  })
+
+  it('submits engine:commit format when commits are provided', async () => {
+    vi.mocked(createSPRTTest).mockResolvedValue({ id: 'new-t2', status: 'running' })
+
+    render(<SPRTTestsPage />)
+    await waitFor(() => expect(screen.getByText('New Test')).toBeInTheDocument())
+
+    await userEvent.click(screen.getByText('New Test'))
+
+    await userEvent.selectOptions(screen.getByLabelText('Engine A'), 'engine-1')
+    await userEvent.type(screen.getByLabelText('Commit (Engine A)'), 'abc123')
+    await userEvent.selectOptions(screen.getByLabelText('Engine B'), 'engine-2')
+    await userEvent.type(screen.getByLabelText('Commit (Engine B)'), 'def456')
+
+    await userEvent.click(screen.getByText('Create Test'))
+
+    await waitFor(() => {
+      expect(createSPRTTest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          engine_a: 'engine-1:abc123',
+          engine_b: 'engine-2:def456',
+        }),
+      )
     })
   })
 
