@@ -23,10 +23,12 @@ from sprt_runner.runner import (
     WorkerTask,
     _cleanup_workers,  # type: ignore[reportPrivateUsage]
     _resolve_run_command,  # type: ignore[reportPrivateUsage]
+    _terminate_all_workers,  # type: ignore[reportPrivateUsage]
     build_parser,
     format_complete_message,
     format_error_message,
     format_game_result_message,
+    format_interrupted_message,
     format_progress_message,
     run_sprt,
     worker_entry,
@@ -625,6 +627,9 @@ class _SlowFakeProcess:
     def terminate(self) -> None:
         pass
 
+    def kill(self) -> None:
+        self._alive = False
+
 
 class TestRunSprtNonBlocking:
     """Verify that run_sprt() does not block the event loop."""
@@ -1219,3 +1224,287 @@ class TestSigkillFallback:
 
         # kill() must NOT have been called — workers exit promptly
         assert kill_called == []
+
+
+# ---------------------------------------------------------------------------
+# format_interrupted_message tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatInterruptedMessage:
+    """Tests for the format_interrupted_message JSON-lines formatter."""
+
+    def test_basic_interrupted_message(self) -> None:
+        """Interrupted message contains type and games_played."""
+        msg = format_interrupted_message(games_played=5)
+        parsed = json.loads(msg)
+        assert parsed["type"] == "interrupted"
+        assert parsed["games_played"] == 5
+
+    def test_zero_games_played(self) -> None:
+        """Interrupted with zero games played."""
+        msg = format_interrupted_message(games_played=0)
+        parsed = json.loads(msg)
+        assert parsed["type"] == "interrupted"
+        assert parsed["games_played"] == 0
+
+    def test_is_valid_json(self) -> None:
+        """Interrupted message is valid single-line JSON."""
+        msg = format_interrupted_message(games_played=10)
+        assert "\n" not in msg
+        json.loads(msg)
+
+
+# ---------------------------------------------------------------------------
+# _terminate_all_workers tests
+# ---------------------------------------------------------------------------
+
+
+class TestTerminateAllWorkers:
+    """Tests for the _terminate_all_workers helper."""
+
+    def test_terminates_and_joins_all(self) -> None:
+        """All workers are terminated and joined."""
+        workers: list[multiprocessing.Process] = []
+        for _ in range(3):
+            w = MagicMock(spec=multiprocessing.Process)
+            w.is_alive.return_value = False
+            workers.append(w)
+
+        _terminate_all_workers(workers)
+
+        for w in workers:
+            w.terminate.assert_called_once()  # type: ignore[union-attr]
+            w.join.assert_called_once_with(timeout=5)  # type: ignore[union-attr]
+            w.kill.assert_not_called()  # type: ignore[union-attr]
+
+    def test_kills_stubborn_worker(self) -> None:
+        """Workers that ignore SIGTERM get SIGKILL."""
+        w = MagicMock(spec=multiprocessing.Process)
+        w.pid = 42
+        w.is_alive.return_value = True  # stays alive after terminate
+
+        _terminate_all_workers([w])
+
+        w.terminate.assert_called_once()  # type: ignore[union-attr]
+        w.kill.assert_called_once()  # type: ignore[union-attr]
+        # join called twice: once after terminate, once after kill
+        assert w.join.call_count == 2  # type: ignore[union-attr]
+
+    def test_empty_list_is_noop(self) -> None:
+        """Terminating an empty list does nothing."""
+        _terminate_all_workers([])  # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown tests
+# ---------------------------------------------------------------------------
+
+
+class _InterruptibleFakeProcess:
+    """Fake process: delivers first N results, then stays alive for interruption.
+
+    Tracks terminate() and kill() calls for verification.
+    """
+
+    captured_tasks: ClassVar[list[WorkerTask]] = []
+    call_count: ClassVar[int] = 0
+    interrupt_after: ClassVar[int] = 2
+    terminate_called: ClassVar[list[int]] = []
+    kill_called: ClassVar[list[int]] = []
+    next_pid: ClassVar[int] = 12000
+
+    def __init__(
+        self,
+        *,
+        target: object = None,
+        args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+    ) -> None:
+        task, queue = args
+        _InterruptibleFakeProcess.captured_tasks.append(task)
+        call = _InterruptibleFakeProcess.call_count
+        _InterruptibleFakeProcess.call_count += 1
+
+        self._pid = _InterruptibleFakeProcess.next_pid
+        _InterruptibleFakeProcess.next_pid += 1
+
+        if call < _InterruptibleFakeProcess.interrupt_after:
+            queue.put(
+                WorkerResult(
+                    game_id=task.game_id,
+                    result=GameResult.WHITE_WIN,
+                    termination="checkmate",
+                    move_count=20,
+                    swap_colors=task.swap_colors,
+                )
+            )
+            self._alive = False
+        else:
+            # Don't put result — simulate an ongoing game
+            self._alive = True
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+    def start(self) -> None:
+        pass
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+    def terminate(self) -> None:
+        _InterruptibleFakeProcess.terminate_called.append(self._pid)
+        self._alive = False
+
+    def kill(self) -> None:
+        _InterruptibleFakeProcess.kill_called.append(self._pid)
+        self._alive = False
+
+
+class TestGracefulShutdown:
+    """Verify graceful shutdown on SIGINT / CancelledError."""
+
+    @staticmethod
+    def _reset_interruptible() -> None:
+        _InterruptibleFakeProcess.captured_tasks = []
+        _InterruptibleFakeProcess.call_count = 0
+        _InterruptibleFakeProcess.interrupt_after = 2
+        _InterruptibleFakeProcess.terminate_called = []
+        _InterruptibleFakeProcess.kill_called = []
+        _InterruptibleFakeProcess.next_pid = 12000
+
+    @pytest.mark.asyncio
+    async def test_cancel_terminates_remaining_workers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancelling run_sprt() terminates workers that are still running."""
+        self._reset_interruptible()
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _InterruptibleFakeProcess)
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 1.0)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=5.0,
+            book_path=None,
+        )
+
+        task = asyncio.create_task(run_sprt(config))
+        await asyncio.sleep(0.1)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # The third worker (pid=12002) should have been terminated
+        assert 12002 in _InterruptibleFakeProcess.terminate_called
+
+    @pytest.mark.asyncio
+    async def test_partial_progress_on_cancel(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Partial progress is output before the interrupted message on cancel."""
+        self._reset_interruptible()
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _InterruptibleFakeProcess)
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 1.0)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=5.0,
+            book_path=None,
+        )
+
+        task = asyncio.create_task(run_sprt(config))
+        await asyncio.sleep(0.1)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        captured = capsys.readouterr().out
+        lines = [line.strip() for line in captured.strip().split("\n") if line.strip()]
+
+        # Find the interrupted message — it should be the last line
+        interrupted_msgs = [json.loads(ln) for ln in lines if '"type": "interrupted"' in ln]
+        assert len(interrupted_msgs) == 1
+        assert interrupted_msgs[0]["games_played"] == 2
+
+        # A progress message should appear right before the interrupted message
+        # showing partial W/D/L/LLR
+        progress_msgs = [json.loads(ln) for ln in lines if '"type": "progress"' in ln]
+        assert len(progress_msgs) >= 1
+        last_progress = progress_msgs[-1]
+        assert last_progress["games_total"] == 2
+        assert "llr" in last_progress
+        assert "wins" in last_progress
+        assert "losses" in last_progress
+
+    @pytest.mark.asyncio
+    async def test_cancel_with_zero_games_outputs_interrupted_only(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """If cancelled before any games complete, only interrupted message is output."""
+        self._reset_interruptible()
+        _InterruptibleFakeProcess.interrupt_after = 0  # All workers stay alive
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _InterruptibleFakeProcess)
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 1.0)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=5.0,
+            book_path=None,
+        )
+
+        task = asyncio.create_task(run_sprt(config))
+        await asyncio.sleep(0.1)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        captured = capsys.readouterr().out
+        lines = [line.strip() for line in captured.strip().split("\n") if line.strip()]
+
+        # Only the interrupted message (no progress since zero games)
+        interrupted_msgs = [json.loads(ln) for ln in lines if '"type": "interrupted"' in ln]
+        assert len(interrupted_msgs) == 1
+        assert interrupted_msgs[0]["games_played"] == 0
+
+        # No progress messages (no games completed)
+        progress_in_interrupted = [ln for ln in lines if '"type": "progress"' in ln]
+        assert len(progress_in_interrupted) == 0
