@@ -903,6 +903,185 @@ class TestDeadWorkerErrorReporting:
         )
 
 
+# ---------------------------------------------------------------------------
+# Queue exception handling tests
+# ---------------------------------------------------------------------------
+
+
+class _QueueErrorFakeProcess:
+    """Fake process whose queue raises a non-Empty exception.
+
+    The queue injected into the constructor is replaced with one that raises
+    the configured exception on ``get()``.
+    """
+
+    next_pid: ClassVar[int] = 11000
+    exception_to_raise: ClassVar[type[BaseException]] = EOFError
+
+    def __init__(
+        self,
+        *,
+        target: object = None,
+        args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+    ) -> None:
+        _task, real_queue = args
+        self._pid = _QueueErrorFakeProcess.next_pid
+        _QueueErrorFakeProcess.next_pid += 1
+
+        # Poison the shared queue so that the *next* get() raises the
+        # configured exception instead of returning a result.
+        _poison_queue(real_queue, _QueueErrorFakeProcess.exception_to_raise)
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+    def start(self) -> None:
+        pass
+
+    def is_alive(self) -> bool:
+        return False
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+    def terminate(self) -> None:
+        pass
+
+
+def _poison_queue(
+    q: multiprocessing.Queue[WorkerResult],
+    exc_type: type[BaseException],
+) -> None:
+    """Replace ``q.get`` with a callable that raises *exc_type*."""
+
+    def _raise(timeout: float | None = None) -> WorkerResult:
+        raise exc_type("simulated queue corruption")
+
+    q.get = _raise  # type: ignore[assignment]
+
+
+class TestQueueExceptionHandling:
+    """Verify that only queue.Empty triggers the timeout path.
+
+    Other exceptions must be logged and cause the SPRT run to abort
+    rather than being silently swallowed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_queue_empty_triggers_dead_worker_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """queue.Empty from a timed-out get() should enter the
+        dead-worker detection path and not abort immediately."""
+        _DeadFakeProcess.captured_tasks = []
+        _DeadFakeProcess.next_pid = 9000
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _DeadFakeProcess)
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+        )
+
+        await run_sprt(config)
+
+        captured = capsys.readouterr().out
+        lines = [line for line in captured.strip().split("\n") if line]
+        error_msgs = [json.loads(line) for line in lines if '"type": "error"' in line]
+
+        # Dead-worker path should have produced error messages (not a fatal abort)
+        assert any("died unexpectedly" in m["message"] for m in error_msgs)
+        # The fatal "Fatal error reading result queue" should NOT appear
+        assert not any("Fatal error reading result queue" in m["message"] for m in error_msgs)
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_is_not_swallowed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Non-Empty exceptions (e.g. EOFError) must not be silently
+        swallowed.  They should be logged and cause the run to abort."""
+        _QueueErrorFakeProcess.next_pid = 11000
+        _QueueErrorFakeProcess.exception_to_raise = EOFError
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _QueueErrorFakeProcess)
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+        )
+
+        await run_sprt(config)
+
+        captured = capsys.readouterr().out
+        lines = [line for line in captured.strip().split("\n") if line]
+        error_msgs = [json.loads(line) for line in lines if '"type": "error"' in line]
+
+        # Should see the fatal error message, NOT the dead-worker message
+        assert any("Fatal error reading result queue" in m["message"] for m in error_msgs)
+        # Should NOT see "died unexpectedly" — that's the queue.Empty path
+        assert not any("died unexpectedly" in m["message"] for m in error_msgs)
+
+    @pytest.mark.asyncio
+    async def test_oserror_is_not_swallowed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """OSError on queue.get() must also be treated as fatal."""
+        _QueueErrorFakeProcess.next_pid = 11000
+        _QueueErrorFakeProcess.exception_to_raise = OSError
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _QueueErrorFakeProcess)
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
+
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+        )
+
+        await run_sprt(config)
+
+        captured = capsys.readouterr().out
+        lines = [line for line in captured.strip().split("\n") if line]
+        error_msgs = [json.loads(line) for line in lines if '"type": "error"' in line]
+
+        assert any("Fatal error reading result queue" in m["message"] for m in error_msgs)
+
+
 class TestRunConfigKeepWorktrees:
     """Tests for RunConfig keep_worktrees field."""
 

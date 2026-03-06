@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import multiprocessing
+import queue
 import shlex
 import signal
 import sys
@@ -587,7 +588,7 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                 worker_result = await loop.run_in_executor(
                     None, lambda: result_queue.get(timeout=_QUEUE_TIMEOUT_SECONDS)
                 )
-            except Exception:
+            except queue.Empty:
                 # Queue timeout — check for dead workers
                 dead = [w for w in active_workers if not w.is_alive()]
                 for w in dead:
@@ -609,6 +610,13 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                     print(format_error_message("All workers died unexpectedly"), flush=True)
                     break
                 continue
+            except Exception:
+                logger.exception("Unexpected error while reading from result queue")
+                print(
+                    format_error_message("Fatal error reading result queue; aborting"),
+                    flush=True,
+                )
+                break
 
             # Clean up finished workers (join to free resources)
             active_workers = _cleanup_workers(active_workers)
