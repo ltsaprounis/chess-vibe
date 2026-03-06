@@ -130,6 +130,15 @@ export async function cancelSPRTTest(id: string): Promise<void> {
 }
 
 /**
+ * Fetch all SPRT tests.
+ */
+export async function fetchSPRTTests(): Promise<SPRTTest[]> {
+  const response = await fetch('/api/sprt/tests')
+  if (!response.ok) await handleError(response)
+  return (await response.json()) as SPRTTest[]
+}
+
+/**
  * Fetch the list of available opening books.
  */
 export async function fetchOpeningBooks(): Promise<OpeningBook[]> {
