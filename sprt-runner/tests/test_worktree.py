@@ -11,6 +11,7 @@ import pytest
 from sprt_runner.worktree import (
     EngineSpec,
     WorktreeError,
+    _create_worktree,
     cleanup_worktree,
     parse_engine_spec,
     resolve_engine_path,
@@ -58,6 +59,83 @@ class TestEngineSpec:
         s1 = EngineSpec(engine_id="eng", commit="abc")
         s2 = EngineSpec(engine_id="eng", commit="abc")
         assert s1 == s2
+
+
+class TestCreateWorktree:
+    """Tests for _create_worktree stale directory handling."""
+
+    @pytest.mark.asyncio
+    async def test_valid_worktree_returned_as_is(self, tmp_path: Path) -> None:
+        """A directory with a .git file is a valid worktree and returned without recreation."""
+        worktree_path = tmp_path / ".worktrees" / "abc123"
+        worktree_path.mkdir(parents=True, exist_ok=True)
+        # Valid worktrees have a .git file (not directory)
+        (worktree_path / ".git").write_text("gitdir: /some/repo/.git/worktrees/abc123\n")
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            result = await _create_worktree(tmp_path, "abc123")
+            assert result == worktree_path
+            # Should NOT call git worktree add — it's already valid
+            mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_directory_recreated(self, tmp_path: Path) -> None:
+        """A directory without a .git file is stale and must be removed and recreated."""
+        worktree_path = tmp_path / ".worktrees" / "abc123"
+        worktree_path.mkdir(parents=True, exist_ok=True)
+        # Put a marker file to prove the directory gets removed
+        (worktree_path / "stale_marker.txt").write_text("I am stale")
+
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate = AsyncMock(return_value=(b"", b""))
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
+            result = await _create_worktree(tmp_path, "abc123")
+            assert result == worktree_path
+            # Should have called git worktree add to recreate
+            mock_exec.assert_called_once()
+            call_args = mock_exec.call_args[0]
+            assert call_args[:3] == ("git", "worktree", "add")
+
+    @pytest.mark.asyncio
+    async def test_stale_directory_removed_before_recreation(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The stale directory should be removed before attempting to recreate."""
+        worktree_path = tmp_path / ".worktrees" / "abc123"
+        worktree_path.mkdir(parents=True, exist_ok=True)
+        (worktree_path / "leftover_file.txt").write_text("leftover")
+
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate = AsyncMock(return_value=(b"", b""))
+
+        with (
+            patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            caplog.at_level(logging.WARNING),
+        ):
+            mock_exec.return_value = mock_process
+            await _create_worktree(tmp_path, "abc123")
+
+        assert any("Stale worktree" in msg for msg in caplog.messages)
+
+    @pytest.mark.asyncio
+    async def test_stale_directory_recreation_failure_raises(self, tmp_path: Path) -> None:
+        """If recreation of a stale worktree fails, a clear error is raised."""
+        worktree_path = tmp_path / ".worktrees" / "abc123"
+        worktree_path.mkdir(parents=True, exist_ok=True)
+        # No .git file → stale
+
+        mock_process = AsyncMock()
+        mock_process.returncode = 128
+        mock_process.communicate = AsyncMock(return_value=(b"", b"fatal: not a commit"))
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_process
+            with pytest.raises(WorktreeError, match="Failed to create worktree"):
+                await _create_worktree(tmp_path, "abc123")
 
 
 class TestResolveEnginePath:

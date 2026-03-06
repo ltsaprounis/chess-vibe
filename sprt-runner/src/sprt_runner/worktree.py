@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,8 +76,19 @@ async def _create_worktree(repo_root: Path, commit: str) -> Path:
     """
     worktree_path = repo_root / ".worktrees" / commit
     if worktree_path.exists():
-        logger.info("Worktree already exists: %s", worktree_path)
-        return worktree_path
+        # Git worktrees contain a .git *file* (not directory) that points
+        # back to the main repository.  If the file is missing the
+        # directory is stale (e.g. left behind after `git worktree prune`).
+        git_marker = worktree_path / ".git"
+        if git_marker.exists():
+            logger.info("Worktree already exists: %s", worktree_path)
+            return worktree_path
+
+        logger.warning(
+            "Stale worktree directory detected (no .git file), removing: %s",
+            worktree_path,
+        )
+        shutil.rmtree(worktree_path)
 
     logger.info("Creating worktree at %s for commit %s", worktree_path, commit)
     process = await asyncio.create_subprocess_exec(
