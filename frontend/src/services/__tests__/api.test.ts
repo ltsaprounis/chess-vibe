@@ -5,6 +5,7 @@ import {
   fetchGame,
   createSPRTTest,
   fetchSPRTTest,
+  fetchSPRTTests,
   cancelSPRTTest,
   fetchOpeningBooks,
   ApiError,
@@ -253,6 +254,47 @@ describe('cancelSPRTTest', () => {
     mockFetch.mockResolvedValueOnce(errorResponse(404, "No running test with id 't1'"))
 
     await expect(cancelSPRTTest('t1')).rejects.toThrow(ApiError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// fetchSPRTTests
+// ---------------------------------------------------------------------------
+
+describe('fetchSPRTTests', () => {
+  it('calls GET /api/sprt/tests and returns tests', async () => {
+    const tests = [
+      {
+        id: 't1',
+        engine_a: 'e1',
+        engine_b: 'e2',
+        time_control: { type: 'movetime', movetime_ms: 1000 },
+        elo0: 0,
+        elo1: 5,
+        alpha: 0.05,
+        beta: 0.05,
+        created_at: '2025-01-01T00:00:00Z',
+        status: 'running',
+        wins: 10,
+        losses: 5,
+        draws: 3,
+        llr: 1.5,
+        result: null,
+        completed_at: null,
+      },
+    ]
+    mockFetch.mockResolvedValueOnce(jsonResponse(tests))
+
+    const result = await fetchSPRTTests()
+
+    expect(mockFetch).toHaveBeenCalledWith('/api/sprt/tests')
+    expect(result).toEqual(tests)
+  })
+
+  it('throws ApiError on error', async () => {
+    mockFetch.mockResolvedValueOnce(errorResponse(500, 'Internal error'))
+
+    await expect(fetchSPRTTests()).rejects.toThrow(ApiError)
   })
 })
 
