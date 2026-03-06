@@ -78,7 +78,7 @@ class TestSPRTRunnerIntegration:
     @pytest.mark.asyncio
     async def test_abbreviated_sprt_completes(
         self,
-        random_engine_command: str,
+        random_engine_command: str,  # triggers skip if venv absent
         sprt_repo_root: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -159,7 +159,7 @@ class TestSPRTRunnerIntegration:
     @pytest.mark.asyncio
     async def test_sprt_with_opening_book(
         self,
-        random_engine_command: str,
+        random_engine_command: str,  # triggers skip if venv absent
         sprt_repo_root: Path,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
