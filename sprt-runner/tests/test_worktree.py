@@ -8,14 +8,17 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import sprt_runner.worktree as _worktree_mod
 from sprt_runner.worktree import (
     EngineSpec,
     WorktreeError,
-    _create_worktree,
     cleanup_worktree,
     parse_engine_spec,
     resolve_engine_path,
 )
+
+# Access _create_worktree via the module to avoid pyright reportPrivateUsage
+_create_worktree = _worktree_mod._create_worktree  # pyright: ignore[reportPrivateUsage]
 
 
 class TestParseEngineSpec:
