@@ -209,3 +209,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local docs
+local_docs/
+
+# Backend data directory
+backend/data/
