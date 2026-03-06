@@ -23,6 +23,7 @@ import json
 import logging
 import multiprocessing
 import shlex
+import signal
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -203,6 +204,26 @@ def format_error_message(message: str) -> str:
     )
 
 
+def format_interrupted_message(games_played: int) -> str:
+    """Format an interruption notice as a JSON-lines message.
+
+    Emitted when the SPRT run is interrupted by a signal (SIGINT/SIGTERM)
+    before a statistical decision is reached.
+
+    Args:
+        games_played: Number of games completed before the interruption.
+
+    Returns:
+        Single-line JSON string.
+    """
+    return json.dumps(
+        {
+            "type": "interrupted",
+            "games_played": games_played,
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # SPRT orchestration
 # ---------------------------------------------------------------------------
@@ -367,6 +388,27 @@ def _cleanup_workers(
     return still_alive
 
 
+def _terminate_all_workers(active_workers: list[multiprocessing.Process]) -> None:
+    """Terminate all active workers using SIGTERM → join → SIGKILL.
+
+    Sends ``SIGTERM`` to each worker, waits briefly, and escalates to
+    ``SIGKILL`` if the worker does not exit in time.
+
+    Args:
+        active_workers: Workers to terminate.
+    """
+    for w in active_workers:
+        w.terminate()
+        w.join(timeout=5)
+        if w.is_alive():
+            logger.warning(
+                "Worker %d did not exit after SIGTERM, sending SIGKILL",
+                w.pid,
+            )
+            w.kill()
+            w.join(timeout=2)
+
+
 def _collect_worktree_paths(
     base_spec: EngineSpec, test_spec: EngineSpec, repo_root: Path
 ) -> list[Path]:
@@ -401,9 +443,29 @@ async def run_sprt(config: RunConfig) -> None:
     Worktrees created during engine resolution are cleaned up after the
     test completes (or fails), unless ``config.keep_worktrees`` is True.
 
+    On ``SIGTERM`` the current asyncio task is cancelled, which triggers
+    graceful worker termination inside ``_run_sprt_inner``.
+
     Args:
         config: Run configuration.
     """
+    # Register SIGTERM → cancel-task handler so SIGTERM triggers the same
+    # graceful shutdown path as SIGINT (KeyboardInterrupt → CancelledError).
+    loop = asyncio.get_running_loop()
+    current_task = asyncio.current_task()
+
+    def _sigterm_handler() -> None:
+        logger.info("Received SIGTERM — cancelling SPRT task")
+        if current_task is not None:
+            current_task.cancel()
+
+    sigterm_registered = False
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _sigterm_handler)
+        sigterm_registered = True
+    except NotImplementedError:
+        pass  # Windows — SIGTERM via add_signal_handler not supported
+
     # Resolve engines
     base_spec = parse_engine_spec(config.base)
     test_spec = parse_engine_spec(config.test)
@@ -414,6 +476,8 @@ async def run_sprt(config: RunConfig) -> None:
     try:
         await _run_sprt_inner(config, base_spec, test_spec)
     finally:
+        if sigterm_registered:
+            loop.remove_signal_handler(signal.SIGTERM)
         if not config.keep_worktrees:
             for wt_path in worktree_paths:
                 await cleanup_worktree(wt_path, repo_root=config.repo_root)
@@ -462,208 +526,237 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
     # Map worker PID → game_id so dead workers can be identified.
     worker_game_ids: dict[int, str] = {}
 
-    while True:
-        # Launch workers up to concurrency limit
-        while len(active_workers) < config.concurrency:
-            # Select opening
-            start_fen: str | None = None
-            swap_colors = False
-            if opening_pairs:
-                pair = opening_pairs[pair_index % len(opening_pairs)]
-                start_fen = pair.fen
-                swap_colors = pair.swap_colors
-                pair_index += 1
-            else:
-                swap_colors = pair_index % 2 == 1
-                pair_index += 1
-
-            # Determine colour assignment
-            if swap_colors:
-                white_run, white_dir = test_run, test_dir
-                black_run, black_dir = base_run, base_dir
-            else:
-                white_run, white_dir = base_run, base_dir
-                black_run, black_dir = test_run, test_dir
-
-            white_cmd = _resolve_run_command(white_run, white_dir)
-            black_cmd = _resolve_run_command(black_run, black_dir)
-
-            game_id = str(uuid.uuid4())
-            game_config = GameConfig(
-                time_control=config.time_control,
-                adjudication=config.adjudication,
-                start_fen=start_fen,
-            )
-
-            task = WorkerTask(
-                game_id=game_id,
-                white_cmd=white_cmd,
-                black_cmd=black_cmd,
-                game_config=game_config,
-                swap_colors=swap_colors,
-            )
-
-            worker = multiprocessing.Process(
-                target=worker_entry,
-                args=(task, result_queue),
-            )
-            worker.start()
-            active_workers.append(worker)
-            pid = worker.pid
-            if pid is None:
-                raise RuntimeError("Worker process PID is None after start()")
-            worker_game_ids[pid] = game_id
-
-        # Wait for a result from any worker (with timeout for crash safety).
-        # Offload the blocking queue.get() to a thread so the asyncio event
-        # loop stays responsive (allows cancellation, status updates, etc.).
-        loop = asyncio.get_running_loop()
-        try:
-            worker_result = await loop.run_in_executor(
-                None, lambda: result_queue.get(timeout=_QUEUE_TIMEOUT_SECONDS)
-            )
-        except Exception:
-            # Queue timeout — check for dead workers
-            dead = [w for w in active_workers if not w.is_alive()]
-            for w in dead:
-                wpid = w.pid
-                if wpid is not None:
-                    dead_game_id = worker_game_ids.pop(wpid, "unknown")
+    try:
+        while True:
+            # Launch workers up to concurrency limit
+            while len(active_workers) < config.concurrency:
+                # Select opening
+                start_fen: str | None = None
+                swap_colors = False
+                if opening_pairs:
+                    pair = opening_pairs[pair_index % len(opening_pairs)]
+                    start_fen = pair.fen
+                    swap_colors = pair.swap_colors
+                    pair_index += 1
                 else:
-                    dead_game_id = "unknown"
+                    swap_colors = pair_index % 2 == 1
+                    pair_index += 1
+
+                # Determine colour assignment
+                if swap_colors:
+                    white_run, white_dir = test_run, test_dir
+                    black_run, black_dir = base_run, base_dir
+                else:
+                    white_run, white_dir = base_run, base_dir
+                    black_run, black_dir = test_run, test_dir
+
+                white_cmd = _resolve_run_command(white_run, white_dir)
+                black_cmd = _resolve_run_command(black_run, black_dir)
+
+                game_id = str(uuid.uuid4())
+                game_config = GameConfig(
+                    time_control=config.time_control,
+                    adjudication=config.adjudication,
+                    start_fen=start_fen,
+                )
+
+                task = WorkerTask(
+                    game_id=game_id,
+                    white_cmd=white_cmd,
+                    black_cmd=black_cmd,
+                    game_config=game_config,
+                    swap_colors=swap_colors,
+                )
+
+                worker = multiprocessing.Process(
+                    target=worker_entry,
+                    args=(task, result_queue),
+                )
+                worker.start()
+                active_workers.append(worker)
+                pid = worker.pid
+                if pid is None:
+                    raise RuntimeError("Worker process PID is None after start()")
+                worker_game_ids[pid] = game_id
+
+            # Wait for a result from any worker (with timeout for crash safety).
+            # Offload the blocking queue.get() to a thread so the asyncio event
+            # loop stays responsive (allows cancellation, status updates, etc.).
+            loop = asyncio.get_running_loop()
+            try:
+                worker_result = await loop.run_in_executor(
+                    None, lambda: result_queue.get(timeout=_QUEUE_TIMEOUT_SECONDS)
+                )
+            except Exception:
+                # Queue timeout — check for dead workers
+                dead = [w for w in active_workers if not w.is_alive()]
+                for w in dead:
+                    wpid = w.pid
+                    if wpid is not None:
+                        dead_game_id = worker_game_ids.pop(wpid, "unknown")
+                    else:
+                        dead_game_id = "unknown"
+                    print(
+                        format_error_message(
+                            f"Worker for game {dead_game_id} died unexpectedly (pid={wpid})"
+                        ),
+                        flush=True,
+                    )
+                    errors += 1
+                    w.join(timeout=1)
+                active_workers = [w for w in active_workers if w.is_alive()]
+                if not active_workers:
+                    print(format_error_message("All workers died unexpectedly"), flush=True)
+                    break
+                continue
+
+            # Clean up finished workers (join to free resources)
+            active_workers = _cleanup_workers(active_workers)
+
+            # The worker that produced this result has done its job — remove
+            # its entry from the mapping so it is not flagged as a dead worker.
+            pid_to_remove: int | None = None
+            for pid, gid in worker_game_ids.items():
+                if gid == worker_result.game_id:
+                    pid_to_remove = pid
+                    break
+            if pid_to_remove is not None:
+                del worker_game_ids[pid_to_remove]
+
+            # Detect workers that have exited and no longer appear in active_workers.
+            # We cannot safely distinguish here between normal and abnormal exits,
+            # and results may still be waiting in the queue, so we only clean up the
+            # bookkeeping and log a warning instead of treating this as a hard error.
+            active_pids = {w.pid for w in active_workers}
+            for pid in list(worker_game_ids):
+                if pid not in active_pids:
+                    dead_game_id = worker_game_ids.pop(pid)
+                    logger.warning(
+                        "Worker process for game %s is no longer active (pid=%s); "
+                        "result may already be queued or the worker may have exited early.",
+                        dead_game_id,
+                        pid,
+                    )
+
+            # Handle result
+            if worker_result.error is not None:
                 print(
                     format_error_message(
-                        f"Worker for game {dead_game_id} died unexpectedly (pid={wpid})"
+                        f"Game {worker_result.game_id} failed: {worker_result.error}"
                     ),
                     flush=True,
                 )
-                errors += 1
-                w.join(timeout=1)
-            active_workers = [w for w in active_workers if w.is_alive()]
-            if not active_workers:
-                print(format_error_message("All workers died unexpectedly"), flush=True)
-                break
-            continue
+                continue
 
-        # Clean up finished workers (join to free resources)
-        active_workers = _cleanup_workers(active_workers)
+            if worker_result.result is None:
+                continue
 
-        # The worker that produced this result has done its job — remove
-        # its entry from the mapping so it is not flagged as a dead worker.
-        pid_to_remove: int | None = None
-        for pid, gid in worker_game_ids.items():
-            if gid == worker_result.game_id:
-                pid_to_remove = pid
-                break
-        if pid_to_remove is not None:
-            del worker_game_ids[pid_to_remove]
+            games_played += 1
 
-        # Detect workers that have exited and no longer appear in active_workers.
-        # We cannot safely distinguish here between normal and abnormal exits,
-        # and results may still be waiting in the queue, so we only clean up the
-        # bookkeeping and log a warning instead of treating this as a hard error.
-        active_pids = {w.pid for w in active_workers}
-        for pid in list(worker_game_ids):
-            if pid not in active_pids:
-                dead_game_id = worker_game_ids.pop(pid)
-                logger.warning(
-                    "Worker process for game %s is no longer active (pid=%s); "
-                    "result may already be queued or the worker may have exited early.",
-                    dead_game_id,
-                    pid,
-                )
-
-        # Handle result
-        if worker_result.error is not None:
-            print(
-                format_error_message(f"Game {worker_result.game_id} failed: {worker_result.error}"),
-                flush=True,
-            )
-            continue
-
-        if worker_result.result is None:
-            continue
-
-        games_played += 1
-
-        # Determine result from test engine's perspective
-        if worker_result.swap_colors:
-            # Test was white
-            if worker_result.result == GameResult.WHITE_WIN:
-                wins += 1
-            elif worker_result.result == GameResult.BLACK_WIN:
-                losses += 1
+            # Determine result from test engine's perspective
+            if worker_result.swap_colors:
+                # Test was white
+                if worker_result.result == GameResult.WHITE_WIN:
+                    wins += 1
+                elif worker_result.result == GameResult.BLACK_WIN:
+                    losses += 1
+                else:
+                    draws += 1
             else:
-                draws += 1
-        else:
-            # Test was black
-            if worker_result.result == GameResult.BLACK_WIN:
-                wins += 1
-            elif worker_result.result == GameResult.WHITE_WIN:
-                losses += 1
-            else:
-                draws += 1
+                # Test was black
+                if worker_result.result == GameResult.BLACK_WIN:
+                    wins += 1
+                elif worker_result.result == GameResult.WHITE_WIN:
+                    losses += 1
+                else:
+                    draws += 1
 
-        # Output game result
-        print(
-            format_game_result_message(
-                game_id=worker_result.game_id,
-                result=worker_result.result,
-                termination=worker_result.termination or "unknown",
-                move_count=worker_result.move_count,
-            ),
-            flush=True,
-        )
-
-        # SPRT check
-        sprt_result = sprt_test(
-            wins=wins,
-            losses=losses,
-            draws=draws,
-            elo0=config.elo0,
-            elo1=config.elo1,
-            alpha=config.alpha,
-            beta=config.beta,
-        )
-
-        # Output progress
-        print(
-            format_progress_message(
-                wins=wins,
-                losses=losses,
-                draws=draws,
-                llr=sprt_result.llr,
-                lower_bound=sprt_result.lower_bound,
-                upper_bound=sprt_result.upper_bound,
-                games_total=games_played,
-                errors=errors,
-            ),
-            flush=True,
-        )
-
-        # Check stopping condition
-        if sprt_result.decision != SPRTDecision.CONTINUE:
-            result_str = sprt_result.decision.value
+            # Output game result
             print(
-                format_complete_message(
-                    result=result_str,
-                    total_games=games_played,
-                    llr=sprt_result.llr,
+                format_game_result_message(
+                    game_id=worker_result.game_id,
+                    result=worker_result.result,
+                    termination=worker_result.termination or "unknown",
+                    move_count=worker_result.move_count,
                 ),
                 flush=True,
             )
-            # Terminate remaining workers
-            for w in active_workers:
-                w.terminate()
-                w.join(timeout=5)
-                if w.is_alive():
-                    logger.warning(
-                        "Worker %d did not exit after SIGTERM, sending SIGKILL",
-                        w.pid,
-                    )
-                    w.kill()
-                    w.join(timeout=2)
-            break
+
+            # SPRT check
+            sprt_result = sprt_test(
+                wins=wins,
+                losses=losses,
+                draws=draws,
+                elo0=config.elo0,
+                elo1=config.elo1,
+                alpha=config.alpha,
+                beta=config.beta,
+            )
+
+            # Output progress
+            print(
+                format_progress_message(
+                    wins=wins,
+                    losses=losses,
+                    draws=draws,
+                    llr=sprt_result.llr,
+                    lower_bound=sprt_result.lower_bound,
+                    upper_bound=sprt_result.upper_bound,
+                    games_total=games_played,
+                    errors=errors,
+                ),
+                flush=True,
+            )
+
+            # Check stopping condition
+            if sprt_result.decision != SPRTDecision.CONTINUE:
+                result_str = sprt_result.decision.value
+                print(
+                    format_complete_message(
+                        result=result_str,
+                        total_games=games_played,
+                        llr=sprt_result.llr,
+                    ),
+                    flush=True,
+                )
+                # Terminate remaining workers before breaking
+                _terminate_all_workers(active_workers)
+                active_workers.clear()
+                break
+
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("SPRT run interrupted — shutting down gracefully")
+        # Report partial progress so the caller knows how far the test got
+        if games_played > 0:
+            partial_sprt = sprt_test(
+                wins=wins,
+                losses=losses,
+                draws=draws,
+                elo0=config.elo0,
+                elo1=config.elo1,
+                alpha=config.alpha,
+                beta=config.beta,
+            )
+            print(
+                format_progress_message(
+                    wins=wins,
+                    losses=losses,
+                    draws=draws,
+                    llr=partial_sprt.llr,
+                    lower_bound=partial_sprt.lower_bound,
+                    upper_bound=partial_sprt.upper_bound,
+                    games_total=games_played,
+                    errors=errors,
+                ),
+                flush=True,
+            )
+        print(format_interrupted_message(games_played), flush=True)
+        raise
+
+    finally:
+        # Terminate any workers still alive (no-op if already cleared at
+        # normal SPRT convergence).
+        _terminate_all_workers(active_workers)
 
 
 # ---------------------------------------------------------------------------
@@ -754,4 +847,9 @@ def main() -> None:
         keep_worktrees=args.keep_worktrees,
     )
 
-    asyncio.run(run_sprt(run_config))
+    try:
+        asyncio.run(run_sprt(run_config))
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except asyncio.CancelledError:
+        sys.exit(1)
