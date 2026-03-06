@@ -850,6 +850,8 @@ def main() -> None:
     try:
         asyncio.run(run_sprt(run_config))
     except KeyboardInterrupt:
+        # asyncio.run() re-raises KeyboardInterrupt after cancelling the task.
         sys.exit(130)
     except asyncio.CancelledError:
+        # SIGTERM handler cancels the task; asyncio.run() propagates CancelledError.
         sys.exit(1)
