@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import chess
+import chess.syzygy
 from shared.storage.models import GameResult, Move
 from shared.time_control import (
     FixedTimeControl,
@@ -173,6 +174,33 @@ async def play_game(
 
     Returns:
         GameOutcome with the result, termination reason, and moves.
+    """
+    # Open Syzygy tablebase once for the entire game
+    tablebase: chess.syzygy.Tablebase | None = None
+    if config.adjudication.syzygy_path is not None:
+        try:
+            tablebase = chess.syzygy.open_tablebase(str(config.adjudication.syzygy_path))
+        except Exception:
+            logger.warning("Failed to open Syzygy tablebase", exc_info=True)
+
+    try:
+        return await _play_game_loop(white=white, black=black, config=config, tablebase=tablebase)
+    finally:
+        if tablebase is not None:
+            tablebase.close()
+
+
+async def _play_game_loop(
+    *,
+    white: UCIClient,
+    black: UCIClient,
+    config: GameConfig,
+    tablebase: chess.syzygy.Tablebase | None,
+) -> GameOutcome:
+    """Run the main game loop.
+
+    This is an internal helper for ``play_game``. The caller is responsible
+    for opening and closing the *tablebase* handle.
     """
     # Initialize board
     board = chess.Board(config.start_fen) if config.start_fen else chess.Board()
@@ -336,6 +364,7 @@ async def play_game(
             move_number=full_moves,
             config=config.adjudication,
             board=board,
+            tablebase=tablebase,
         )
         if adj_result is not None:
             logger.info("Adjudication: %s", adj_result.reason)

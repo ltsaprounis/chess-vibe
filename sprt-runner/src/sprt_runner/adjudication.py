@@ -71,6 +71,7 @@ def check_adjudication(
     move_number: int,
     config: AdjudicationConfig,
     board: chess.Board | None = None,
+    tablebase: chess.syzygy.Tablebase | None = None,
 ) -> AdjudicationResult | None:
     """Check whether a game should be adjudicated.
 
@@ -83,13 +84,14 @@ def check_adjudication(
         move_number: Current move number in the game.
         config: Adjudication thresholds.
         board: Current board position for tablebase probing (optional).
+        tablebase: Pre-opened Syzygy tablebase handle for reuse across calls (optional).
 
     Returns:
         An AdjudicationResult if the game should be adjudicated, else None.
     """
     # Syzygy tablebase adjudication (highest priority)
-    if board is not None and config.syzygy_path is not None:
-        tb_result = _check_syzygy(board, config.syzygy_path)
+    if board is not None and tablebase is not None:
+        tb_result = _check_syzygy(board, tablebase)
         if tb_result is not None:
             return tb_result
 
@@ -184,7 +186,7 @@ def _check_draw(
 
 def _check_syzygy(
     board: chess.Board,
-    syzygy_path: Path,
+    tablebase: chess.syzygy.Tablebase,
 ) -> AdjudicationResult | None:
     """Check for Syzygy tablebase adjudication.
 
@@ -194,7 +196,7 @@ def _check_syzygy(
 
     Args:
         board: Current board position.
-        syzygy_path: Path to the Syzygy tablebase directory.
+        tablebase: Pre-opened Syzygy tablebase handle.
 
     Returns:
         An AdjudicationResult if the position is resolved, else None.
@@ -204,11 +206,8 @@ def _check_syzygy(
     if piece_count > 7:
         return None
 
-    # Note: opening tablebase per probe is acceptable since this only
-    # runs when pieces ≤ 7 (late endgame). python-chess caches internally.
     try:
-        with chess.syzygy.open_tablebase(str(syzygy_path)) as tablebase:
-            wdl = tablebase.probe_wdl(board)
+        wdl = tablebase.probe_wdl(board)
     except KeyError:
         # Position not in tablebases
         return None
