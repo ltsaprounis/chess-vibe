@@ -84,16 +84,33 @@ def check_adjudication(
         move_number: Current move number in the game.
         config: Adjudication thresholds.
         board: Current board position for tablebase probing (optional).
-        tablebase: Pre-opened Syzygy tablebase handle for reuse across calls (optional).
+        tablebase: Pre-opened Syzygy tablebase handle for reuse across calls
+            (optional). When ``None`` but ``config.syzygy_path`` is set, a
+            temporary tablebase is opened per call as a fallback.
 
     Returns:
         An AdjudicationResult if the game should be adjudicated, else None.
     """
     # Syzygy tablebase adjudication (highest priority)
-    if board is not None and tablebase is not None:
-        tb_result = _check_syzygy(board, tablebase)
-        if tb_result is not None:
-            return tb_result
+    if board is not None:
+        if tablebase is not None:
+            tb_result = _check_syzygy(board, tablebase)
+            if tb_result is not None:
+                return tb_result
+        elif config.syzygy_path is not None:
+            # Fallback: open a temporary tablebase when no pre-opened handle
+            # is provided. Prefer passing a pre-opened handle for performance.
+            try:
+                with chess.syzygy.open_tablebase(str(config.syzygy_path)) as tb:
+                    tb_result = _check_syzygy(board, tb)
+                    if tb_result is not None:
+                        return tb_result
+            except Exception:
+                logger.debug(
+                    "Failed to open Syzygy tablebase at %s",
+                    config.syzygy_path,
+                    exc_info=True,
+                )
 
     # Win adjudication: both engines agree one side is winning
     win_result = _check_win(white_scores, black_scores, config)

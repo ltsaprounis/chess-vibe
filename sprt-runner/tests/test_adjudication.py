@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import chess
@@ -243,18 +244,33 @@ class TestSyzygyAdjudication:
         mock_tb = MagicMock()
         mock_tb.probe_wdl.return_value = 0  # Draw
 
-        # Call check_adjudication multiple times with the same handle
-        for _ in range(5):
-            check_adjudication(
-                [], [], move_number=100, config=config, board=board, tablebase=mock_tb
-            )
-
-        # open_tablebase should never be called — the pre-opened handle is used directly
+        # Patch open_tablebase for the entire sequence to verify it is never called
         with patch("chess.syzygy.open_tablebase") as mock_open:
-            check_adjudication(
-                [], [], move_number=100, config=config, board=board, tablebase=mock_tb
-            )
+            for _ in range(5):
+                check_adjudication(
+                    [], [], move_number=100, config=config, board=board, tablebase=mock_tb
+                )
             mock_open.assert_not_called()
 
         # The same mock_tb handle was used for all probes
-        assert mock_tb.probe_wdl.call_count == 6
+        assert mock_tb.probe_wdl.call_count == 5
+
+    def test_syzygy_fallback_opens_tablebase_when_no_handle(self, tmp_path: Path) -> None:
+        """When tablebase is None but syzygy_path is set, falls back to opening per call."""
+        config = AdjudicationConfig(
+            syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        board = chess.Board("8/8/8/8/8/8/1k6/KQ6 w - - 0 1")
+        mock_tb = MagicMock()
+        mock_tb.probe_wdl.return_value = 2  # Win
+        mock_tb.__enter__ = MagicMock(return_value=mock_tb)
+        mock_tb.__exit__ = MagicMock(return_value=False)
+
+        with patch("chess.syzygy.open_tablebase", return_value=mock_tb) as mock_open:
+            result = check_adjudication(
+                [], [], move_number=100, config=config, board=board, tablebase=None
+            )
+            mock_open.assert_called_once_with(str(tmp_path))
+
+        assert result is not None
+        assert result.adjudication_type == AdjudicationType.WIN_WHITE
