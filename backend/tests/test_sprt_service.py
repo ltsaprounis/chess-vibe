@@ -165,8 +165,7 @@ class TestSPRTServiceStderr:
             # Two tasks should be created: _monitor and _drain_stderr
             assert mock_create_task.call_count == 2
             coroutine_names = [
-                call.args[0].cr_code.co_qualname
-                for call in mock_create_task.call_args_list
+                call.args[0].cr_code.co_qualname for call in mock_create_task.call_args_list
             ]
             assert "SPRTService._monitor" in coroutine_names
             assert "SPRTService._drain_stderr" in coroutine_names
