@@ -340,7 +340,19 @@ export function SPRTTestsPage(): React.JSX.Element {
       setError(err instanceof Error ? err.message : 'Failed to create test')
       setSubmitting(false)
     }
-  }, [engineA, commitA, engineB, commitB, timeControl, elo0, elo1, alpha, beta, selectedBook, concurrency])
+  }, [
+    engineA,
+    commitA,
+    engineB,
+    commitB,
+    timeControl,
+    elo0,
+    elo1,
+    alpha,
+    beta,
+    selectedBook,
+    concurrency,
+  ])
 
   // -----------------------------------------------------------------------
   // Render
