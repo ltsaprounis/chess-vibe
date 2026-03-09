@@ -37,6 +37,7 @@ class GameSession:
         client: UCI engine client.
         time_control: Time control for the engine.
         created_at: Timestamp when the session started.
+        initial_fen: Starting FEN, or ``None`` for standard start position.
     """
 
     game_id: str
@@ -49,6 +50,7 @@ class GameSession:
         default_factory=lambda: FixedTimeControl(movetime_ms=_DEFAULT_MOVETIME_MS)
     )
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    initial_fen: str | None = None
 
 
 class GameManager:
@@ -112,6 +114,7 @@ class GameManager:
             board=board,
             client=client,
             time_control=tc,
+            initial_fen=fen,
         )
         self._sessions[game_id] = session
 
@@ -138,7 +141,9 @@ class GameManager:
             raise RuntimeError("No engine client for session")
 
         moves_uci = [m.uci for m in session.moves]
-        await session.client.position(moves=moves_uci if moves_uci else None)
+        await session.client.position(
+            fen=session.initial_fen, moves=moves_uci if moves_uci else None
+        )
 
         bestmove, infos = await session.client.go(session.time_control)
 
