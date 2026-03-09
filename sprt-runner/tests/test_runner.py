@@ -12,7 +12,7 @@ from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
-from shared.storage.models import Game, GameResult, Move
+from shared.storage.models import GameResult, Move
 from shared.time_control import DepthTimeControl, FixedTimeControl, parse_time_control
 from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig
