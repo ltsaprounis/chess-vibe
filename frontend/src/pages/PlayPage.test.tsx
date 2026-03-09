@@ -44,8 +44,8 @@ vi.mock('react-chessboard', () => ({
 // ---------------------------------------------------------------------------
 
 const mockEngines = [
-  { id: 'engine-1', name: 'Stockfish', dir: '/engines/sf', run: './sf' },
-  { id: 'engine-2', name: 'Leela', dir: '/engines/lc', run: './lc' },
+  { id: 'engine-1', name: 'Stockfish' },
+  { id: 'engine-2', name: 'Leela' },
 ]
 
 type WsOnMessage = (data: unknown) => void

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from backend.main import create_app
@@ -101,3 +102,49 @@ class TestSPRTRoutes:
     def test_cancel_nonexistent_test(self, client: TestClient) -> None:
         resp = client.post("/api/sprt/tests/nonexistent/cancel")
         assert resp.status_code == 404
+
+    def test_create_sprt_test_invalid_book_id_returns_400(self, client: TestClient) -> None:
+        """POST /sprt/tests with a non-existent book_id returns 400."""
+        resp = client.post(
+            "/api/sprt/tests",
+            json={
+                "engine_a": "engine-a",
+                "engine_b": "engine-b",
+                "time_control": "movetime=100",
+                "book_id": "nonexistent-book",
+            },
+        )
+        assert resp.status_code == 400
+        assert "nonexistent-book" in resp.json()["detail"]
+
+    def test_create_sprt_test_valid_book_id_resolves_path(
+        self, client: TestClient, data_dir: Path
+    ) -> None:
+        """POST /sprt/tests with a valid book_id resolves to a filesystem path."""
+        books_dir = data_dir / "openings"
+        books_dir.mkdir(parents=True)
+        book_file = books_dir / "my-book.pgn"
+        book_file.write_text("1. e4 e5 *")
+
+        # The book repo uses the stem as the ID
+        book_id = "my-book"
+
+        with patch(
+            "backend.services.sprt_service.SPRTService.start_test",
+            new_callable=AsyncMock,
+            return_value="test-123",
+        ) as mock_start:
+            resp = client.post(
+                "/api/sprt/tests",
+                json={
+                    "engine_a": "engine-a",
+                    "engine_b": "engine-b",
+                    "time_control": "movetime=100",
+                    "book_id": book_id,
+                },
+            )
+            assert resp.status_code == 201
+            # Verify the resolved filesystem path was passed to start_test
+            mock_start.assert_called_once()
+            call_kwargs = mock_start.call_args
+            assert call_kwargs.kwargs["book_path"] == str(book_file)
