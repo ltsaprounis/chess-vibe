@@ -141,8 +141,6 @@ class EngineResponse(BaseModel):
 
     id: str
     name: str
-    dir: str
-    run: str
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +153,6 @@ class OpeningBookResponse(BaseModel):
 
     id: str
     name: str
-    path: str
     format: str
 
 
@@ -164,7 +161,6 @@ class OpeningBookUploadResponse(BaseModel):
 
     id: str
     name: str
-    path: str
     format: str
 
 

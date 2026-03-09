@@ -92,14 +92,11 @@ export interface SPRTTest {
 export interface Engine {
   id: string
   name: string
-  dir: string
-  run: string
 }
 
 export interface OpeningBook {
   id: string
   name: string
-  path: string
   format: string
 }
 

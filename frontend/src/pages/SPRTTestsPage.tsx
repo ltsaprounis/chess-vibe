@@ -504,7 +504,7 @@ export function SPRTTestsPage(): React.JSX.Element {
               >
                 <option value="">None</option>
                 {books.map((b) => (
-                  <option key={b.id} value={b.path}>
+                  <option key={b.id} value={b.id}>
                     {b.name}
                   </option>
                 ))}

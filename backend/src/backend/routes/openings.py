@@ -22,8 +22,7 @@ def list_opening_books(request: Request) -> list[OpeningBookResponse]:
     """
     book_repo: OpeningBookRepository = request.app.state.book_repo
     return [
-        OpeningBookResponse(id=b.id, name=b.name, path=b.path, format=b.format)
-        for b in book_repo.list_books()
+        OpeningBookResponse(id=b.id, name=b.name, format=b.format) for b in book_repo.list_books()
     ]
 
 
@@ -55,6 +54,5 @@ async def upload_opening_book(
     return OpeningBookUploadResponse(
         id=book.id,
         name=book.name,
-        path=book.path,
         format=book.format,
     )

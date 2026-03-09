@@ -7,6 +7,7 @@ subprocesses managed by :class:`backend.services.sprt_service.SPRTService`.
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
+from shared.storage.repository import OpeningBookRepository
 
 from backend.converters import sprt_test_to_response
 from backend.models import SPRTTestCreatedResponse, SPRTTestCreateRequest, SPRTTestResponse
@@ -31,6 +32,12 @@ async def create_sprt_test(
         The new test ID and initial status.
     """
     sprt_service = request.app.state.sprt_service
+    book_path = body.book_path
+    if book_path is not None:
+        book_repo: OpeningBookRepository = request.app.state.book_repo
+        resolved = book_repo.get_book_path(book_path)
+        if resolved is not None:
+            book_path = str(resolved)
     try:
         test_id = await sprt_service.start_test(
             engine_a=body.engine_a,
@@ -40,7 +47,7 @@ async def create_sprt_test(
             elo1=body.elo1,
             alpha=body.alpha,
             beta=body.beta,
-            book_path=body.book_path,
+            book_path=book_path,
             concurrency=body.concurrency,
         )
     except Exception as e:

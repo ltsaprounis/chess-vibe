@@ -36,6 +36,27 @@ class TestEnginesRoute:
             assert data[0]["id"] == "test-engine"
             assert data[0]["name"] == "Test Engine"
 
+    def test_list_engines_does_not_expose_dir_or_run(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """Verify the response does not leak filesystem paths or shell commands."""
+        entries = [
+            EngineEntry(
+                id="test-engine",
+                name="Test Engine",
+                dir="engines/test",
+                build=None,
+                run=".venv/bin/python -m test_engine",
+            )
+        ]
+        with patch("backend.routes.engines.load_registry", return_value=entries):
+            resp = client.get("/api/engines")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data) == 1
+            assert "dir" not in data[0]
+            assert "run" not in data[0]
+
     def test_list_engines_registry_error(self, client: TestClient) -> None:
         with patch(
             "backend.routes.engines.load_registry",
