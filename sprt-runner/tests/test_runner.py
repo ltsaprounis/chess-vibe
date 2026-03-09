@@ -12,7 +12,7 @@ from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
-from shared.storage.models import Game, GameResult, Move
+from shared.storage.models import GameResult, Move
 from shared.time_control import DepthTimeControl, FixedTimeControl, parse_time_control
 from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig
@@ -1295,8 +1295,17 @@ class TestOutputDirCLI:
         """With --output-dir, the value should be set."""
         parser = build_parser()
         args = parser.parse_args(
-            ["run", "--base", "eng1", "--test", "eng2", "--tc", "depth=1",
-             "--output-dir", "/tmp/games"]
+            [
+                "run",
+                "--base",
+                "eng1",
+                "--test",
+                "eng2",
+                "--tc",
+                "depth=1",
+                "--output-dir",
+                "/tmp/games",
+            ]
         )
         assert args.output_dir == "/tmp/games"
 

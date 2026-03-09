@@ -810,9 +810,7 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                 try:
                     _write_game(output_dir, game)
                 except Exception:
-                    logger.exception(
-                        "Failed to persist game %s", worker_result.game_id
-                    )
+                    logger.exception("Failed to persist game %s", worker_result.game_id)
 
             # SPRT check
             sprt_result = sprt_test(
