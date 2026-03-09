@@ -372,7 +372,7 @@ class SPRTService:
                 line = raw.decode().strip()
                 if line:
                     logger.debug("SPRT runner stderr [%s]: %s", running.test_id, line)
-        except Exception:
+        except OSError:
             logger.debug("Error reading stderr for SPRT test %s", running.test_id)
 
     def _update_test_from_progress(self, running: _RunningTest) -> None:
