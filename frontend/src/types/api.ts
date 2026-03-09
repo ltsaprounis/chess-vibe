@@ -61,7 +61,7 @@ export interface SPRTTestCreateRequest {
   elo1?: number
   alpha?: number
   beta?: number
-  book_path?: string | null
+  book_id?: string | null
   concurrency?: number
 }
 

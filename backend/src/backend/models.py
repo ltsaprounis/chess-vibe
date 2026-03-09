@@ -99,7 +99,7 @@ class SPRTTestCreateRequest(BaseModel):
     elo1: float = 5.0
     alpha: float = 0.05
     beta: float = 0.05
-    book_path: str | None = None
+    book_id: str | None = None
     concurrency: int = 1
 
 

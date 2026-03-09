@@ -33,13 +33,11 @@ async def create_sprt_test(
     """
     sprt_service = request.app.state.sprt_service
     resolved_book_path: str | None = None
-    if body.book_path is not None:
+    if body.book_id is not None:
         book_repo: OpeningBookRepository = request.app.state.book_repo
-        resolved = book_repo.get_book_path(body.book_path)
+        resolved = book_repo.get_book_path(body.book_id)
         if resolved is None:
-            raise HTTPException(
-                status_code=400, detail=f"Opening book '{body.book_path}' not found"
-            )
+            raise HTTPException(status_code=400, detail=f"Opening book '{body.book_id}' not found")
         resolved_book_path = str(resolved)
     try:
         test_id = await sprt_service.start_test(

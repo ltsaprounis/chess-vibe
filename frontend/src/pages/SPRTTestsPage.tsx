@@ -297,7 +297,7 @@ export function SPRTTestsPage(): React.JSX.Element {
         elo1,
         alpha,
         beta,
-        book_path: selectedBook || null,
+        book_id: selectedBook || null,
         concurrency,
       })
       // Add new test to list and start watching

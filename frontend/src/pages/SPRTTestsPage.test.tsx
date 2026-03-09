@@ -319,7 +319,7 @@ describe('SPRTTestsPage', () => {
         elo1: 5,
         alpha: 0.05,
         beta: 0.05,
-        book_path: null,
+        book_id: null,
         concurrency: 1,
       })
     })
