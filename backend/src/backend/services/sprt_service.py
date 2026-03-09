@@ -57,6 +57,8 @@ class _RunningTest:
         process: The subprocess handle.
         progress: Latest progress snapshot.
         subscribers: WebSocket queues awaiting updates.
+        monitor_task: Background task reading stdout JSON-lines.
+        stderr_task: Background task draining stderr.
     """
 
     test_id: str
@@ -65,6 +67,8 @@ class _RunningTest:
     subscribers: list[asyncio.Queue[dict[str, Any]]] = field(
         default_factory=list[asyncio.Queue[dict[str, Any]]]
     )
+    monitor_task: asyncio.Task[None] | None = None
+    stderr_task: asyncio.Task[None] | None = None
 
 
 class SPRTService:
@@ -189,7 +193,8 @@ class SPRTService:
         running = _RunningTest(test_id=test_id, process=process)
         self._running[test_id] = running
 
-        asyncio.get_event_loop().create_task(self._monitor(running))
+        running.monitor_task = asyncio.create_task(self._monitor(running))
+        running.stderr_task = asyncio.create_task(self._drain_stderr(running))
 
         logger.info("Started SPRT test %s (pid=%s)", test_id, process.pid)
         return test_id
@@ -354,6 +359,21 @@ class SPRTService:
         finally:
             await running.process.wait()
             self._running.pop(running.test_id, None)
+
+    async def _drain_stderr(self, running: _RunningTest) -> None:
+        """Read and log stderr from the SPRT runner subprocess to prevent pipe deadlock."""
+        assert running.process.stderr is not None
+
+        try:
+            while True:
+                raw = await running.process.stderr.readline()
+                if not raw:
+                    break
+                line = raw.decode().strip()
+                if line:
+                    logger.debug("SPRT runner stderr [%s]: %s", running.test_id, line)
+        except OSError:
+            logger.debug("Error reading stderr for SPRT test %s", running.test_id)
 
     def _update_test_from_progress(self, running: _RunningTest) -> None:
         """Persist progress to the test repository."""

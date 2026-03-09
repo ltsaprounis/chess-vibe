@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import backend.services.sprt_service as _sprt_mod
 import pytest
 from backend.services.sprt_service import SPRTProgress, SPRTService
 from shared.storage.models import SPRTStatus, SPRTTest
 from shared.time_control import FixedTimeControl
+
+_RunningTest = _sprt_mod._RunningTest  # pyright: ignore[reportPrivateUsage]
 
 
 class TestSPRTServiceRecovery:
@@ -96,3 +99,73 @@ class TestSPRTServiceProperties:
         service = SPRTService(repo)
         result = await service.cancel_test("nonexistent")
         assert result is False
+
+
+class TestSPRTServiceStderr:
+    """Tests for SPRT service stderr draining."""
+
+    @pytest.mark.asyncio
+    async def test_drain_stderr_logs_output(self) -> None:
+        """_drain_stderr reads and logs stderr lines without hanging."""
+        stderr_lines = [b"warning: something\n", b"debug info\n", b""]
+        stderr_mock = MagicMock()
+        stderr_mock.readline = AsyncMock(side_effect=stderr_lines)
+
+        process = MagicMock()
+        process.stderr = stderr_mock
+
+        running = _RunningTest(test_id="test-1", process=process)
+        service = SPRTService(MagicMock())
+
+        await service._drain_stderr(running)  # pyright: ignore[reportPrivateUsage]
+
+        assert stderr_mock.readline.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_drain_stderr_handles_empty_stream(self) -> None:
+        """_drain_stderr handles immediate EOF gracefully."""
+        stderr_mock = MagicMock()
+        stderr_mock.readline = AsyncMock(return_value=b"")
+
+        process = MagicMock()
+        process.stderr = stderr_mock
+
+        running = _RunningTest(test_id="test-2", process=process)
+        service = SPRTService(MagicMock())
+
+        await service._drain_stderr(running)  # pyright: ignore[reportPrivateUsage]
+
+        stderr_mock.readline.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_start_test_spawns_stderr_drain_task(self) -> None:
+        """start_test creates a background task to drain stderr."""
+        repo = MagicMock()
+        repo.save_sprt_test = MagicMock()
+        service = SPRTService(repo)
+
+        mock_process = MagicMock()
+        mock_process.pid = 42
+        mock_process.stdout = MagicMock()
+        mock_process.stderr = MagicMock()
+
+        with (
+            patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            patch("asyncio.create_task") as mock_create_task,
+        ):
+            mock_exec.return_value = mock_process
+            await service.start_test(
+                engine_a="engine_a",
+                engine_b="engine_b",
+                time_control_str="movetime=100",
+                elo0=0.0,
+                elo1=5.0,
+            )
+
+            # Two tasks should be created: _monitor and _drain_stderr
+            assert mock_create_task.call_count == 2
+            coroutine_names = [
+                call.args[0].cr_code.co_qualname for call in mock_create_task.call_args_list
+            ]
+            assert "SPRTService._monitor" in coroutine_names
+            assert "SPRTService._drain_stderr" in coroutine_names
