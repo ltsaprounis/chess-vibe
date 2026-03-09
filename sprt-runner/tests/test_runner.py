@@ -1295,8 +1295,17 @@ class TestOutputDirCLI:
         """With --output-dir, the value should be set."""
         parser = build_parser()
         args = parser.parse_args(
-            ["run", "--base", "eng1", "--test", "eng2", "--tc", "depth=1",
-             "--output-dir", "/tmp/games"]
+            [
+                "run",
+                "--base",
+                "eng1",
+                "--test",
+                "eng2",
+                "--tc",
+                "depth=1",
+                "--output-dir",
+                "/tmp/games",
+            ]
         )
         assert args.output_dir == "/tmp/games"
 
