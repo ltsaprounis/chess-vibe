@@ -172,3 +172,70 @@ class TestGameManager:
         assert last_info is not None
         assert last_info.depth == 10
         assert len(session.moves) == 1
+
+    @pytest.mark.asyncio
+    async def test_make_engine_move_standard_startpos(self, manager: GameManager) -> None:
+        """Standard start sends ``position startpos`` (fen=None)."""
+        mock_client = MagicMock()
+        mock_client.position = AsyncMock()
+        bestmove = BestMove(move="e2e4")
+        mock_client.go = AsyncMock(return_value=(bestmove, []))
+
+        import chess
+
+        session = GameSession(
+            game_id="test-1",
+            engine_id="test-engine",
+            player_color="black",
+            board=chess.Board(),
+            client=mock_client,
+        )
+
+        await manager.make_engine_move(session)
+        mock_client.position.assert_called_once_with(fen=None, moves=None)
+
+    @pytest.mark.asyncio
+    async def test_make_engine_move_custom_fen(self, manager: GameManager) -> None:
+        """Custom FEN sends ``position fen <FEN> moves ...`` to engine."""
+        custom_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+        mock_client = MagicMock()
+        mock_client.position = AsyncMock()
+        # Black to move from this FEN; engine replies e7e5
+        bestmove = BestMove(move="e7e5")
+        mock_client.go = AsyncMock(return_value=(bestmove, []))
+
+        import chess
+
+        session = GameSession(
+            game_id="test-1",
+            engine_id="test-engine",
+            player_color="white",
+            board=chess.Board(custom_fen),
+            client=mock_client,
+            initial_fen=custom_fen,
+        )
+
+        uci_move, san, _fen, _info = await manager.make_engine_move(session)
+        assert uci_move == "e7e5"
+        assert san == "e5"
+        mock_client.position.assert_called_once_with(fen=custom_fen, moves=None)
+
+    @pytest.mark.asyncio
+    async def test_create_session_stores_initial_fen(self, manager: GameManager) -> None:
+        """create_session stores the initial FEN on the session."""
+        custom_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+        session = await manager.create_session(
+            engine_id="test-engine",
+            engine_path="/path/to/engine",
+            fen=custom_fen,
+        )
+        assert session.initial_fen == custom_fen
+
+    @pytest.mark.asyncio
+    async def test_create_session_standard_start_fen_is_none(self, manager: GameManager) -> None:
+        """create_session without FEN leaves initial_fen as None."""
+        session = await manager.create_session(
+            engine_id="test-engine",
+            engine_path="/path/to/engine",
+        )
+        assert session.initial_fen is None
