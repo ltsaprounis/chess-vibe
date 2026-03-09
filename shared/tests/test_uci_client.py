@@ -215,7 +215,7 @@ class TestUCIClientStartStop:
                 "random_engine",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
             )
 
     @pytest.mark.asyncio

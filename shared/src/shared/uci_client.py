@@ -224,7 +224,7 @@ class UCIClient:
                 *argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
             )
             logger.info("Started engine process: %s (pid=%s)", self.engine_path, self._process.pid)
         except (FileNotFoundError, PermissionError, OSError) as e:
