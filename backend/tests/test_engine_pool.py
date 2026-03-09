@@ -50,6 +50,60 @@ class TestEnginePool:
             assert pool._semaphore._value == 1  # type: ignore[reportAttributeAccessIssue]
 
     @pytest.mark.asyncio
+    async def test_acquire_uci_failure_quits_engine(self) -> None:
+        """If uci() raises after start(), quit() must be called to avoid orphan."""
+        pool = EnginePool(max_engines=1)
+
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
+        mock_client.uci = AsyncMock(side_effect=RuntimeError("uci failed"))
+        mock_client.quit = AsyncMock()
+
+        with patch("backend.services.engine_pool.UCIClient", return_value=mock_client):
+            with pytest.raises(RuntimeError, match="uci failed"):
+                await pool.acquire("bad-engine")
+
+            mock_client.quit.assert_awaited_once()
+            assert pool.active_count == 0
+            assert pool._semaphore._value == 1  # type: ignore[reportAttributeAccessIssue]
+
+    @pytest.mark.asyncio
+    async def test_acquire_isready_failure_quits_engine(self) -> None:
+        """If isready() raises after start(), quit() must be called to avoid orphan."""
+        pool = EnginePool(max_engines=1)
+
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
+        mock_client.uci = AsyncMock()
+        mock_client.isready = AsyncMock(side_effect=RuntimeError("isready failed"))
+        mock_client.quit = AsyncMock()
+
+        with patch("backend.services.engine_pool.UCIClient", return_value=mock_client):
+            with pytest.raises(RuntimeError, match="isready failed"):
+                await pool.acquire("bad-engine")
+
+            mock_client.quit.assert_awaited_once()
+            assert pool.active_count == 0
+            assert pool._semaphore._value == 1  # type: ignore[reportAttributeAccessIssue]
+
+    @pytest.mark.asyncio
+    async def test_acquire_quit_error_does_not_mask_original(self) -> None:
+        """If quit() itself fails during cleanup, the original error still propagates."""
+        pool = EnginePool(max_engines=1)
+
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
+        mock_client.uci = AsyncMock(side_effect=RuntimeError("uci failed"))
+        mock_client.quit = AsyncMock(side_effect=OSError("quit failed"))
+
+        with patch("backend.services.engine_pool.UCIClient", return_value=mock_client):
+            with pytest.raises(RuntimeError, match="uci failed"):
+                await pool.acquire("bad-engine")
+
+            mock_client.quit.assert_awaited_once()
+            assert pool._semaphore._value == 1  # type: ignore[reportAttributeAccessIssue]
+
+    @pytest.mark.asyncio
     async def test_shutdown(self) -> None:
         pool = EnginePool(max_engines=2)
 

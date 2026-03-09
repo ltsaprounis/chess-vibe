@@ -67,6 +67,10 @@ class EnginePool:
             await client.uci(timeout=timeout)
             await client.isready(timeout=timeout)
         except Exception:
+            try:
+                await client.quit()
+            except Exception:
+                logger.warning("Error quitting engine during acquire cleanup", exc_info=True)
             self._semaphore.release()
             raise
 
