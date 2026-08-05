@@ -45,6 +45,25 @@ If the `random-engine` venv is not built, integration tests will skip automatica
 - **Pull requests**: CI runs unit tests only (`make test`).
 - **Pushes to `main`**: CI runs both unit tests and integration tests.
 
+## UI Screenshots
+
+`docs/screenshots/` holds committed screenshots of the frontend, used as
+visual evidence on pull requests that change the UI. Regenerate them with:
+
+```bash
+cd frontend && npm run screenshots
+```
+
+The script boots Vite in-process on a free port and serves fixture data by
+intercepting `/api/**` in the browser, so **no backend, no dev server and no
+seeded `data/` are needed**, and the output is deterministic — rerunning it
+with no UI change produces byte-identical PNGs.
+
+It drives the browser through `playwright-core`, which uses the Chrome
+already installed on your machine instead of downloading its own (set
+`CHROME_PATH` to point at a different Chromium-based binary). CI never runs
+this script.
+
 ## License
 
 Licensed under [GPL-3.0-or-later](LICENSE), because the project builds on
