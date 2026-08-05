@@ -8,12 +8,17 @@ including SPRT recovery.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, cast
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from shared.storage.file_store import (
     FileGameRepository,
     FileOpeningBookRepository,
@@ -32,6 +37,57 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_DATA_DIR = Path("data")
 _DEFAULT_RUNNER_PYTHON = "sprt-runner/.venv/bin/python"
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively replace non-finite floats with their string form.
+
+    Starlette's ``JSONResponse`` renders with ``allow_nan=False``
+    (spec-compliant JSON). A request validation error whose rejected
+    input was NaN/Infinity (e.g. an ``elo0`` guarded by
+    ``allow_inf_nan=False``) embeds that raw float in the error body
+    via ``jsonable_encoder``, which otherwise crashes serialisation of
+    the 422 response itself. Stringifying it keeps the response a
+    clean 422 instead of a 500.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        mapping = cast("dict[Any, Any]", value)
+        return {key: _json_safe(item) for key, item in mapping.items()}
+    if isinstance(value, list):
+        items = cast("list[Any]", value)
+        return [_json_safe(item) for item in items]
+    return value
+
+
+async def _validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Render request validation errors as JSON, guarding non-finite floats.
+
+    Args:
+        request: The incoming request (required by FastAPI's handler
+            signature, unused here).
+        exc: The validation error raised by Pydantic/FastAPI. Typed as
+            ``Exception`` to match Starlette's ``ExceptionHandler``
+            signature; narrowed to :class:`RequestValidationError`
+            below since that is the only exception type this handler
+            is registered for.
+
+    Returns:
+        A 422 JSON response with sanitised error details.
+
+    Raises:
+        Exception: Re-raises ``exc`` unchanged if it is not a
+            :class:`RequestValidationError` (this handler is only ever
+            registered for that type, but ``assert`` would be a no-op
+            under ``python -O``, so the guard is an explicit ``raise``).
+    """
+    if not isinstance(exc, RequestValidationError):
+        raise exc
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _json_safe(jsonable_encoder(exc.errors()))},
+    )
 
 
 @asynccontextmanager
@@ -84,6 +140,10 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    # Guard against non-finite floats (NaN/Infinity) crashing the 422
+    # response itself — see `_validation_exception_handler`.
+    app.add_exception_handler(RequestValidationError, _validation_exception_handler)
 
     # CORS
     origins = cors_origins or ["http://localhost:5173"]
