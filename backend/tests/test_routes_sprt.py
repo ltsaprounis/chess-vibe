@@ -153,6 +153,35 @@ class TestSPRTRoutes:
             call_kwargs = mock_start.call_args
             assert call_kwargs.kwargs["book_path"] == str(book_file)
 
+    def test_start_failure_does_not_leak_filesystem_path(self, client: TestClient) -> None:
+        """A runner launch failure must not echo the interpreter path (#162).
+
+        ``create_subprocess_exec`` raises ``OSError`` whose message embeds
+        the runner interpreter's absolute path; returning ``str(e)`` as the
+        error detail would leak it to the frontend.
+        """
+        leaked_path = "/Users/someone/repos/chess-vibe/sprt-runner/.venv/bin/python"
+        with patch(
+            "backend.services.sprt_service.SPRTService.start_test",
+            new_callable=AsyncMock,
+            side_effect=OSError(f"[Errno 2] No such file or directory: '{leaked_path}'"),
+        ):
+            resp = client.post(
+                "/api/sprt/tests",
+                json={
+                    "engine_a": "engine-a",
+                    "engine_b": "engine-b",
+                    "time_control": "movetime=100",
+                },
+            )
+
+        assert resp.status_code == 500
+        detail: str = resp.json()["detail"]
+        assert detail == "Failed to start the SPRT test"
+        assert leaked_path not in detail
+        # No filesystem path can be present at all if there is no separator.
+        assert "/" not in detail
+
 
 def _valid_payload(**overrides: Any) -> dict[str, Any]:
     """Build a valid POST /sprt/tests body, overridden field by field."""

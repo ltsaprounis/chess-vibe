@@ -6,11 +6,15 @@ subprocesses managed by :class:`backend.services.sprt_service.SPRTService`.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 from shared.storage.repository import OpeningBookRepository
 
 from backend.converters import sprt_test_to_response
 from backend.models import SPRTTestCreatedResponse, SPRTTestCreateRequest, SPRTTestResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sprt/tests", tags=["sprt"])
 
@@ -52,7 +56,11 @@ async def create_sprt_test(
             concurrency=body.concurrency,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        # Launch failures surface as OSError whose message embeds the runner
+        # interpreter's absolute path, so the detail is logged server-side
+        # rather than returned to the client.
+        logger.exception("Failed to start the SPRT test")
+        raise HTTPException(status_code=500, detail="Failed to start the SPRT test") from e
 
     return SPRTTestCreatedResponse(id=test_id, status="running")
 
