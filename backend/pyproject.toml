@@ -5,6 +5,7 @@ description = "FastAPI backend for chess-vibe"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi==0.133.1",
+    "starlette==0.52.1",
     "python-multipart==0.0.22",
     "uvicorn[standard]==0.41.0",
     "shared",
