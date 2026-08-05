@@ -215,3 +215,5 @@ local_docs/
 
 # Backend data directory
 backend/data/
+
+.DS_Store
