@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import chess
+import pytest
 from sprt_runner.adjudication import (
     AdjudicationConfig,
     AdjudicationType,
@@ -45,7 +47,9 @@ class TestWinAdjudication:
         # Only 2 moves above threshold
         white_scores = [1100, 1200]
         black_scores = [-1100, -1200]
-        result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
+        result = check_adjudication(
+            white_scores, black_scores, move_number=10, config=config, tablebase=None
+        )
         assert result is None
 
     def test_win_adjudication_white_wins(self) -> None:
@@ -53,7 +57,9 @@ class TestWinAdjudication:
         config = AdjudicationConfig(win_threshold_cp=1000, win_consecutive_moves=3)
         white_scores = [1100, 1200, 1300]
         black_scores = [-1100, -1200, -1300]
-        result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
+        result = check_adjudication(
+            white_scores, black_scores, move_number=10, config=config, tablebase=None
+        )
         assert result is not None
         assert result.adjudication_type == AdjudicationType.WIN_WHITE
 
@@ -62,7 +68,9 @@ class TestWinAdjudication:
         config = AdjudicationConfig(win_threshold_cp=1000, win_consecutive_moves=3)
         white_scores = [-1100, -1200, -1300]
         black_scores = [1100, 1200, 1300]
-        result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
+        result = check_adjudication(
+            white_scores, black_scores, move_number=10, config=config, tablebase=None
+        )
         assert result is not None
         assert result.adjudication_type == AdjudicationType.WIN_BLACK
 
@@ -71,7 +79,9 @@ class TestWinAdjudication:
         config = AdjudicationConfig(win_threshold_cp=1000, win_consecutive_moves=3)
         white_scores = [1100, 1200, 1300]
         black_scores = [100, 200, 300]  # Black thinks it's winning too
-        result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
+        result = check_adjudication(
+            white_scores, black_scores, move_number=10, config=config, tablebase=None
+        )
         assert result is None
 
     def test_win_resets_on_below_threshold(self) -> None:
@@ -80,7 +90,9 @@ class TestWinAdjudication:
         # 2 above, 1 below, 2 above - not enough consecutive
         white_scores = [1100, 1200, 500, 1100, 1200]
         black_scores = [-1100, -1200, -500, -1100, -1200]
-        result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
+        result = check_adjudication(
+            white_scores, black_scores, move_number=10, config=config, tablebase=None
+        )
         assert result is None
 
 
@@ -92,7 +104,9 @@ class TestDrawAdjudication:
         config = AdjudicationConfig(draw_threshold_cp=10, draw_consecutive_moves=3, draw_min_move=5)
         white_scores = [5, -3, 8]
         black_scores = [-2, 7, -5]
-        result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
+        result = check_adjudication(
+            white_scores, black_scores, move_number=10, config=config, tablebase=None
+        )
         assert result is not None
         assert result.adjudication_type == AdjudicationType.DRAW
 
@@ -103,7 +117,9 @@ class TestDrawAdjudication:
         )
         white_scores = [5, -3, 8]
         black_scores = [-2, 7, -5]
-        result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
+        result = check_adjudication(
+            white_scores, black_scores, move_number=10, config=config, tablebase=None
+        )
         assert result is None
 
     def test_no_draw_eval_too_high(self) -> None:
@@ -111,7 +127,9 @@ class TestDrawAdjudication:
         config = AdjudicationConfig(draw_threshold_cp=10, draw_consecutive_moves=3, draw_min_move=5)
         white_scores = [5, -3, 50]
         black_scores = [-2, 7, -5]
-        result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
+        result = check_adjudication(
+            white_scores, black_scores, move_number=10, config=config, tablebase=None
+        )
         assert result is None
 
 
@@ -121,7 +139,7 @@ class TestAdjudicationDisabled:
     def test_no_adjudication_with_none_scores(self) -> None:
         """Empty score lists should not trigger adjudication."""
         config = AdjudicationConfig()
-        result = check_adjudication([], [], move_number=100, config=config)
+        result = check_adjudication([], [], move_number=100, config=config, tablebase=None)
         assert result is None
 
     def test_disabled_win_adjudication(self) -> None:
@@ -129,7 +147,9 @@ class TestAdjudicationDisabled:
         config = AdjudicationConfig(win_consecutive_moves=0)
         white_scores = [1100, 1200, 1300]
         black_scores = [-1100, -1200, -1300]
-        result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
+        result = check_adjudication(
+            white_scores, black_scores, move_number=10, config=config, tablebase=None
+        )
         assert result is None
 
     def test_disabled_draw_adjudication(self) -> None:
@@ -137,12 +157,20 @@ class TestAdjudicationDisabled:
         config = AdjudicationConfig(draw_consecutive_moves=0, draw_min_move=0)
         white_scores = [5, -3, 8]
         black_scores = [-2, 7, -5]
-        result = check_adjudication(white_scores, black_scores, move_number=10, config=config)
+        result = check_adjudication(
+            white_scores, black_scores, move_number=10, config=config, tablebase=None
+        )
         assert result is None
 
 
 class TestSyzygyAdjudication:
-    """Tests for Syzygy tablebase adjudication logic."""
+    """Tests for Syzygy tablebase adjudication logic.
+
+    The tablebase handle is opened once per game by the caller (see
+    ``game.py``) and passed in directly — ``check_adjudication`` never
+    opens tablebases itself, so these tests pass a mock handle rather
+    than patching ``chess.syzygy.open_tablebase``.
+    """
 
     def test_syzygy_white_wins(self, tmp_path: Path) -> None:
         """Tablebase probe shows white wins."""
@@ -153,11 +181,10 @@ class TestSyzygyAdjudication:
         board = chess.Board("8/8/8/8/8/8/1k6/KQ6 w - - 0 1")
         mock_tb = MagicMock()
         mock_tb.probe_wdl.return_value = 2  # Win
-        mock_tb.__enter__ = MagicMock(return_value=mock_tb)
-        mock_tb.__exit__ = MagicMock(return_value=False)
 
-        with patch("chess.syzygy.open_tablebase", return_value=mock_tb):
-            result = check_adjudication([], [], move_number=100, config=config, board=board)
+        result = check_adjudication(
+            [], [], move_number=100, config=config, board=board, tablebase=mock_tb
+        )
 
         assert result is not None
         assert result.adjudication_type == AdjudicationType.WIN_WHITE
@@ -171,11 +198,10 @@ class TestSyzygyAdjudication:
         board = chess.Board("8/8/8/8/8/8/1K6/kq6 b - - 0 1")
         mock_tb = MagicMock()
         mock_tb.probe_wdl.return_value = 2  # Win for side to move (black)
-        mock_tb.__enter__ = MagicMock(return_value=mock_tb)
-        mock_tb.__exit__ = MagicMock(return_value=False)
 
-        with patch("chess.syzygy.open_tablebase", return_value=mock_tb):
-            result = check_adjudication([], [], move_number=100, config=config, board=board)
+        result = check_adjudication(
+            [], [], move_number=100, config=config, board=board, tablebase=mock_tb
+        )
 
         assert result is not None
         assert result.adjudication_type == AdjudicationType.WIN_BLACK
@@ -188,11 +214,10 @@ class TestSyzygyAdjudication:
         board = chess.Board("8/8/8/8/8/8/1k6/K7 w - - 0 1")
         mock_tb = MagicMock()
         mock_tb.probe_wdl.return_value = 0  # Draw
-        mock_tb.__enter__ = MagicMock(return_value=mock_tb)
-        mock_tb.__exit__ = MagicMock(return_value=False)
 
-        with patch("chess.syzygy.open_tablebase", return_value=mock_tb):
-            result = check_adjudication([], [], move_number=100, config=config, board=board)
+        result = check_adjudication(
+            [], [], move_number=100, config=config, board=board, tablebase=mock_tb
+        )
 
         assert result is not None
         assert result.adjudication_type == AdjudicationType.DRAW
@@ -204,8 +229,14 @@ class TestSyzygyAdjudication:
             syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
         )
         board = chess.Board()  # Starting position has 32 pieces
-        result = check_adjudication([], [], move_number=100, config=config, board=board)
+        mock_tb = MagicMock()
+
+        result = check_adjudication(
+            [], [], move_number=100, config=config, board=board, tablebase=mock_tb
+        )
+
         assert result is None
+        mock_tb.probe_wdl.assert_not_called()
 
     def test_syzygy_disabled_when_no_path(self) -> None:
         """No tablebase adjudication when syzygy_path is None."""
@@ -213,7 +244,9 @@ class TestSyzygyAdjudication:
             syzygy_path=None, win_consecutive_moves=0, draw_consecutive_moves=0
         )
         board = chess.Board("8/8/8/8/8/8/1k6/KQ6 w - - 0 1")
-        result = check_adjudication([], [], move_number=100, config=config, board=board)
+        result = check_adjudication(
+            [], [], move_number=100, config=config, board=board, tablebase=None
+        )
         assert result is None
 
     def test_syzygy_key_error_returns_none(self, tmp_path: Path) -> None:
@@ -224,11 +257,10 @@ class TestSyzygyAdjudication:
         board = chess.Board("8/8/8/8/8/8/1k6/KQ6 w - - 0 1")
         mock_tb = MagicMock()
         mock_tb.probe_wdl.side_effect = KeyError("not found")
-        mock_tb.__enter__ = MagicMock(return_value=mock_tb)
-        mock_tb.__exit__ = MagicMock(return_value=False)
 
-        with patch("chess.syzygy.open_tablebase", return_value=mock_tb):
-            result = check_adjudication([], [], move_number=100, config=config, board=board)
+        result = check_adjudication(
+            [], [], move_number=100, config=config, board=board, tablebase=mock_tb
+        )
 
         assert result is None
 
@@ -241,11 +273,56 @@ class TestSyzygyAdjudication:
         board = chess.Board("8/8/8/8/8/8/1k6/K7 w - - 0 1")
         mock_tb = MagicMock()
         mock_tb.probe_wdl.return_value = -2  # Loss for side to move
-        mock_tb.__enter__ = MagicMock(return_value=mock_tb)
-        mock_tb.__exit__ = MagicMock(return_value=False)
 
-        with patch("chess.syzygy.open_tablebase", return_value=mock_tb):
-            result = check_adjudication([], [], move_number=100, config=config, board=board)
+        result = check_adjudication(
+            [], [], move_number=100, config=config, board=board, tablebase=mock_tb
+        )
 
         assert result is not None
         assert result.adjudication_type == AdjudicationType.WIN_BLACK
+
+    def test_syzygy_explicit_none_handle_disables_without_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``tablebase=None`` with ``syzygy_path`` set is a silent, deliberate disable.
+
+        ``tablebase`` has no default (see
+        ``test_tablebase_parameter_is_required`` below), so the only way
+        to reach this branch is to explicitly pass ``tablebase=None`` —
+        e.g. because opening the tablebase already failed and was logged
+        once, at the point of failure, by ``_open_tablebase`` in
+        ``game.py``. Re-warning here on every position would just be
+        per-move log spam (previously up to ~1000 duplicate warnings per
+        game); this test pins that it no longer happens.
+        """
+        config = AdjudicationConfig(
+            syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        board = chess.Board("8/8/8/8/8/8/1k6/KQ6 w - - 0 1")
+
+        with caplog.at_level(logging.WARNING):
+            result = check_adjudication(
+                [], [], move_number=100, config=config, board=board, tablebase=None
+            )
+
+        assert result is None
+        assert caplog.records == []
+
+    def test_tablebase_parameter_is_required(self, tmp_path: Path) -> None:
+        """``tablebase`` has no default: omitting it fails immediately.
+
+        This is the static guard against the original "silent no-op"
+        hazard: a caller that sets ``config.syzygy_path`` but forgets to
+        open and pass the handle now fails at type-check time (pyright
+        strict flags a missing required argument) instead of silently
+        losing tablebase adjudication at runtime.
+        """
+        config = AdjudicationConfig(
+            syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        board = chess.Board("8/8/8/8/8/8/1k6/KQ6 w - - 0 1")
+
+        with pytest.raises(TypeError, match="tablebase"):
+            check_adjudication(  # type: ignore[call-arg]
+                [], [], move_number=100, config=config, board=board
+            )

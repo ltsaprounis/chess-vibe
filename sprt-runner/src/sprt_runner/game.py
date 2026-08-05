@@ -13,8 +13,10 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 import chess
+import chess.syzygy
 from shared.storage.models import GameResult, Move
 from shared.time_control import (
     FixedTimeControl,
@@ -158,6 +160,31 @@ def _extract_move_data(infos: list[UCIInfo]) -> _MoveData:
     return data
 
 
+def _open_tablebase(syzygy_path: Path | None) -> chess.syzygy.Tablebase | None:
+    """Open the Syzygy tablebase handle once, for reuse across a whole game.
+
+    Args:
+        syzygy_path: Path to the Syzygy tablebase directory, or None to
+            disable tablebase adjudication.
+
+    Returns:
+        An open Tablebase handle, or None if disabled or the tablebase
+        could not be opened (e.g. missing or unreadable directory —
+        logged, not fatal, so a bad path doesn't kill the game).
+    """
+    if syzygy_path is None:
+        return None
+    try:
+        return chess.syzygy.open_tablebase(str(syzygy_path))
+    except OSError:
+        logger.warning(
+            "Failed to open Syzygy tablebase at %s; tablebase adjudication disabled for this game",
+            syzygy_path,
+            exc_info=True,
+        )
+        return None
+
+
 async def play_game(
     *,
     white: UCIClient,
@@ -166,10 +193,47 @@ async def play_game(
 ) -> GameOutcome:
     """Play a complete game between two UCI engines.
 
+    Opens the Syzygy tablebase handle (if configured) once for the whole
+    game and guarantees it is closed on every exit path, including
+    exceptions, before delegating to the game loop.
+
     Args:
         white: UCI client for the white engine.
         black: UCI client for the black engine.
         config: Game configuration.
+
+    Returns:
+        GameOutcome with the result, termination reason, and moves.
+    """
+    tablebase = _open_tablebase(config.adjudication.syzygy_path)
+    try:
+        return await _play_game(white=white, black=black, config=config, tablebase=tablebase)
+    finally:
+        if tablebase is not None:
+            try:
+                tablebase.close()
+            except Exception:
+                # A close failure must not destroy an already-completed
+                # GameOutcome (or mask an exception already propagating
+                # through this finally block) — log and move on.
+                logger.warning("Failed to close Syzygy tablebase", exc_info=True)
+
+
+async def _play_game(
+    *,
+    white: UCIClient,
+    black: UCIClient,
+    config: GameConfig,
+    tablebase: chess.syzygy.Tablebase | None,
+) -> GameOutcome:
+    """Run the game loop for a single game between two UCI engines.
+
+    Args:
+        white: UCI client for the white engine.
+        black: UCI client for the black engine.
+        config: Game configuration.
+        tablebase: An already-open Syzygy tablebase handle, or None.
+            Owned and closed by ``play_game``; this function only probes it.
 
     Returns:
         GameOutcome with the result, termination reason, and moves.
@@ -336,6 +400,7 @@ async def play_game(
             move_number=full_moves,
             config=config.adjudication,
             board=board,
+            tablebase=tablebase,
         )
         if adj_result is not None:
             logger.info("Adjudication: %s", adj_result.reason)
