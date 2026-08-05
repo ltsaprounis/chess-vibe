@@ -32,13 +32,11 @@ vi.mock('../hooks/useWebSocket', () => ({
 // ---------------------------------------------------------------------------
 
 const mockEngines = [
-  { id: 'engine-1', name: 'Stockfish', dir: '/engines/sf', run: './sf' },
-  { id: 'engine-2', name: 'Leela', dir: '/engines/lc', run: './lc' },
+  { id: 'engine-1', name: 'Stockfish' },
+  { id: 'engine-2', name: 'Leela' },
 ]
 
-const mockBooks = [
-  { id: 'b1', name: 'Default Book', path: '/data/openings/default.pgn', format: 'pgn' },
-]
+const mockBooks = [{ id: 'b1', name: 'Default Book', format: 'pgn' }]
 
 const mockTests = [
   {
@@ -321,7 +319,7 @@ describe('SPRTTestsPage', () => {
         elo1: 5,
         alpha: 0.05,
         beta: 0.05,
-        book_path: null,
+        book_id: null,
         concurrency: 1,
       })
     })

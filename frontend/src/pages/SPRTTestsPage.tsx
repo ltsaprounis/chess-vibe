@@ -297,7 +297,7 @@ export function SPRTTestsPage(): React.JSX.Element {
         elo1,
         alpha,
         beta,
-        book_path: selectedBook || null,
+        book_id: selectedBook || null,
         concurrency,
       })
       // Add new test to list and start watching
@@ -504,7 +504,7 @@ export function SPRTTestsPage(): React.JSX.Element {
               >
                 <option value="">None</option>
                 {books.map((b) => (
-                  <option key={b.id} value={b.path}>
+                  <option key={b.id} value={b.id}>
                     {b.name}
                   </option>
                 ))}

@@ -39,6 +39,18 @@ class TestOpeningsRoutes:
         assert "test" in names
         assert "positions" in names
 
+    def test_list_books_does_not_expose_path(self, client: TestClient, data_dir: Path) -> None:
+        """Verify the response does not leak filesystem paths."""
+        books_dir = data_dir / "openings"
+        books_dir.mkdir(parents=True)
+        (books_dir / "test.pgn").write_text("1. e4 e5 *")
+
+        resp = client.get("/api/openings/books")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert "path" not in data[0]
+
     def test_upload_book_pgn(self, client: TestClient, data_dir: Path) -> None:
         resp = client.post(
             "/api/openings/books",
@@ -48,6 +60,7 @@ class TestOpeningsRoutes:
         data = resp.json()
         assert data["name"] == "test.pgn"
         assert data["format"] == "pgn"
+        assert "path" not in data
 
         # Verify file was saved via repository (in openings dir)
         books_dir = data_dir / "openings"

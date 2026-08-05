@@ -61,7 +61,7 @@ export interface SPRTTestCreateRequest {
   elo1?: number
   alpha?: number
   beta?: number
-  book_path?: string | null
+  book_id?: string | null
   concurrency?: number
 }
 
@@ -92,14 +92,11 @@ export interface SPRTTest {
 export interface Engine {
   id: string
   name: string
-  dir: string
-  run: string
 }
 
 export interface OpeningBook {
   id: string
   name: string
-  path: string
   format: string
 }
 

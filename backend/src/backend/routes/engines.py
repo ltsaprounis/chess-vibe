@@ -22,4 +22,4 @@ def list_engines() -> list[EngineResponse]:
     except EngineRegistryError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
-    return [EngineResponse(id=e.id, name=e.name, dir=e.dir, run=e.run) for e in entries]
+    return [EngineResponse(id=e.id, name=e.name) for e in entries]
