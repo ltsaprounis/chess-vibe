@@ -69,6 +69,7 @@ Python SDK config:
 
 ```python
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+
 exporter = OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)
 ```
 

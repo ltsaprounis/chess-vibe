@@ -216,4 +216,9 @@ local_docs/
 # Backend data directory
 backend/data/
 
+# Lockfiles are per-machine, not committed: direct dependencies are
+# specified in each component's pyproject.toml and frontend/package.json.
+uv.lock
+frontend/package-lock.json
+
 .DS_Store

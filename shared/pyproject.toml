@@ -27,7 +27,7 @@ markers = [
 
 [dependency-groups]
 dev = [
-    "ruff",
+    "ruff==0.16.1",
     "pyright",
     "pytest",
     "pytest-asyncio",

@@ -4,6 +4,7 @@
 
 PYTHON_COMPONENTS := shared sprt-runner backend
 PYTHON_VERSION    := 3.13
+RUFF_VERSION      := 0.16.1
 
 .PHONY: help setup test test-integration test-all lint dev dev-backend dev-frontend clean
 
@@ -23,7 +24,7 @@ setup: ## Install all dependencies (Python venvs + npm)
 	@cd $(CURDIR)/engines/random-engine && uv venv .venv --python $(PYTHON_VERSION) && uv pip install --python .venv/bin/python -e .
 	@echo "    ✓ engines built"
 	@echo "==> Setting up frontend ..."
-	@cd $(CURDIR)/frontend && npm ci
+	@cd $(CURDIR)/frontend && npm install
 	@echo "    ✓ frontend ready"
 	@echo ""
 	@echo "All components bootstrapped successfully."
@@ -82,9 +83,9 @@ test-all: ## Run all tests (unit + integration)
 
 lint: ## Run all linters, formatters, and type-checkers
 	@echo "==> Ruff lint ..."
-	@cd $(CURDIR) && uvx ruff check .
+	@cd $(CURDIR) && uvx ruff@$(RUFF_VERSION) check .
 	@echo "==> Ruff format check ..."
-	@cd $(CURDIR) && uvx ruff format --check .
+	@cd $(CURDIR) && uvx ruff@$(RUFF_VERSION) format --check .
 	@for component in $(PYTHON_COMPONENTS); do \
 		echo "==> Pyright ($$component) ..."; \
 		cd $(CURDIR)/$$component && uv run pyright || exit $$?; \

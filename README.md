@@ -44,3 +44,9 @@ If the `random-engine` venv is not built, integration tests will skip automatica
 
 - **Pull requests**: CI runs unit tests only (`make test`).
 - **Pushes to `main`**: CI runs both unit tests and integration tests.
+
+## License
+
+Licensed under [GPL-3.0-or-later](LICENSE), because the project builds on
+[python-chess](https://github.com/niklasf/python-chess) and
+[Stockfish](https://github.com/official-stockfish/Stockfish), both GPL-3.
