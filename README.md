@@ -8,10 +8,10 @@ This project aims to have components that are either 100% AI generated or 100% h
 
 | Component | Tech |
 |---|---|
-| Backend | Python 3.14+, FastAPI |
-| SPRT Runner | Python 3.14+, asyncio + multiprocessing |
-| Shared lib | Python 3.14+, python-chess |
-| Frontend | React 18, TypeScript, Vite, Tailwind CSS |
+| Backend | Python 3.13+, FastAPI |
+| SPRT Runner | Python 3.13+, asyncio + multiprocessing |
+| Shared lib | Python 3.13+, python-chess |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS |
 
 ## Running Tests
 

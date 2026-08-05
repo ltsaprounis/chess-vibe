@@ -18,7 +18,7 @@ For architecture principles, component boundaries, and the high-level system dia
 | Backend | Python 3.13+, FastAPI, uvicorn |
 | SPRT Runner | Python 3.13+, asyncio + multiprocessing |
 | Shared lib | Python 3.13+, python-chess |
-| Frontend | React 18, TypeScript, Vite, Tailwind CSS |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS |
 | Package mgmt | `uv` (Python), `npm` (frontend) |
 | Testing | pytest (Python), Vitest + React Testing Library (frontend) |
 | Linting | Ruff (Python), ESLint + Prettier (TypeScript) |

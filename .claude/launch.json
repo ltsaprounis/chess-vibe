@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend",
+      "_comment": "Runs the FastAPI app for previews on :8000 (no --reload; make dev-backend is the dev loop). --directory matters: the app resolves its data dir relative to cwd, so run from backend/ like the Makefile does. Port must match the frontend's Vite proxy target.",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "--directory", "backend", "uvicorn", "backend.main:create_app", "--factory", "--port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "frontend",
+      "_comment": "Vite dev server; proxies /api and /ws to the backend config on 8000, so start both.",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend", "run", "dev"],
+      "port": 5173
+    }
+  ]
+}
