@@ -65,6 +65,27 @@ class TestEnginesRoute:
             resp = client.get("/api/engines")
             assert resp.status_code == 500
 
+    def test_registry_error_does_not_leak_filesystem_path(self, client: TestClient) -> None:
+        """A registry failure must not echo the registry's absolute path (#162).
+
+        ``EngineRegistryError`` formats the registry path into its message
+        (e.g. ``Cannot read registry file '/abs/path/engines.json'``), so
+        returning ``str(e)`` as the error detail would leak it.
+        """
+        leaked_path = "/Users/someone/repos/chess-vibe/engines.json"
+        with patch(
+            "backend.routes.engines.load_registry",
+            side_effect=EngineRegistryError(f"Cannot read registry file '{leaked_path}': boom"),
+        ):
+            resp = client.get("/api/engines")
+
+        assert resp.status_code == 500
+        detail: str = resp.json()["detail"]
+        assert detail == "Failed to load the engine registry"
+        assert leaked_path not in detail
+        # No filesystem path can be present at all if there is no separator.
+        assert "/" not in detail
+
     def test_list_engines_uses_repo_root_for_registry(
         self, client: TestClient, tmp_path: Path
     ) -> None:
