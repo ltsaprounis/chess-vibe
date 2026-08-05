@@ -217,7 +217,7 @@ local_docs/
 backend/data/
 
 # Lockfiles are per-machine, not committed: direct dependencies are
-# specified in each component's pyproject.toml and frontend/package.json.
+# pinned exactly in each component's pyproject.toml.
 uv.lock
 frontend/package-lock.json
 
