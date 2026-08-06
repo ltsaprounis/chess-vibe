@@ -293,6 +293,40 @@ describe('SPRTTestsPage', () => {
     })
   })
 
+  // The backend caps concurrency at 64 (`ge=1, le=64` on
+  // SPRTTestCreateRequest); rejecting it client-side keeps the user out of a
+  // round-trip that can only come back as a 422.
+  it('shows validation error when concurrency exceeds the backend cap', async () => {
+    render(<SPRTTestsPage />)
+    await waitFor(() => expect(screen.getByText('New Test')).toBeInTheDocument())
+
+    await userEvent.click(screen.getByText('New Test'))
+    await userEvent.selectOptions(screen.getByLabelText('Engine A'), 'engine-1')
+    await userEvent.selectOptions(screen.getByLabelText('Engine B'), 'engine-2')
+
+    const concurrencyInput = screen.getByLabelText('Concurrency')
+    await userEvent.clear(concurrencyInput)
+    await userEvent.type(concurrencyInput, '65')
+
+    await userEvent.click(screen.getByText('Create Test'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Concurrency must be between 1 and 64')).toBeInTheDocument()
+    })
+    expect(createSPRTTest).not.toHaveBeenCalled()
+  })
+
+  it('constrains the concurrency input to the backend range', async () => {
+    render(<SPRTTestsPage />)
+    await waitFor(() => expect(screen.getByText('New Test')).toBeInTheDocument())
+
+    await userEvent.click(screen.getByText('New Test'))
+
+    const concurrencyInput = screen.getByLabelText('Concurrency')
+    expect(concurrencyInput).toHaveAttribute('min', '1')
+    expect(concurrencyInput).toHaveAttribute('max', '64')
+  })
+
   // -----------------------------------------------------------------------
   // Form submission
   // -----------------------------------------------------------------------

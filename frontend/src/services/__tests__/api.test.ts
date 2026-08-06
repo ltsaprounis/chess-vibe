@@ -360,4 +360,88 @@ describe('ApiError handling', () => {
       expect((e as ApiError).message).toBe('Service Unavailable')
     }
   })
+
+  // FastAPI renders a 422 as `detail: [{loc, msg, type}, ...]`, not a string.
+  // Stringifying that array naively yields "[object Object]", which tells the
+  // user nothing about which field the backend rejected.
+  describe('422 validation detail arrays', () => {
+    /** Build a non-ok Response whose JSON body is `{ detail }`. */
+    function validationResponse(detail: unknown): Response {
+      return {
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: () => Promise.resolve({ detail }),
+      } as unknown as Response
+    }
+
+    async function messageFor(detail: unknown): Promise<string> {
+      mockFetch.mockResolvedValueOnce(validationResponse(detail))
+      try {
+        await fetchEngines()
+        expect.fail('Should have thrown')
+      } catch (e) {
+        expect(e).toBeInstanceOf(ApiError)
+        return (e as ApiError).message
+      }
+    }
+
+    it('names the rejected field and its message', async () => {
+      const message = await messageFor([
+        {
+          type: 'less_than_equal',
+          loc: ['body', 'concurrency'],
+          msg: 'Input should be less than or equal to 64',
+        },
+      ])
+
+      expect(message).toBe('concurrency: Input should be less than or equal to 64')
+      expect(message).not.toContain('[object Object]')
+    })
+
+    it('joins multiple validation errors', async () => {
+      const message = await messageFor([
+        { type: 'greater_than', loc: ['body', 'alpha'], msg: 'Input should be greater than 0' },
+        { type: 'missing', loc: ['body', 'engine_a'], msg: 'Field required' },
+      ])
+
+      expect(message).toBe('alpha: Input should be greater than 0; engine_a: Field required')
+    })
+
+    it('joins a nested location with dots and drops the request-part prefix', async () => {
+      const message = await messageFor([
+        {
+          type: 'string_type',
+          loc: ['body', 'time_control', 'type'],
+          msg: 'Input should be a string',
+        },
+      ])
+
+      expect(message).toBe('time_control.type: Input should be a string')
+    })
+
+    it('falls back to the message alone when there is no usable location', async () => {
+      expect(
+        await messageFor([{ type: 'value_error', loc: [], msg: 'Elo1 must exceed Elo0' }]),
+      ).toBe('Elo1 must exceed Elo0')
+      expect(await messageFor([{ type: 'value_error', msg: 'Elo1 must exceed Elo0' }])).toBe(
+        'Elo1 must exceed Elo0',
+      )
+    })
+
+    it('renders a plain string detail unchanged', async () => {
+      expect(await messageFor('Engine not found')).toBe('Engine not found')
+    })
+
+    it('renders an array of plain strings', async () => {
+      expect(await messageFor(['first problem', 'second problem'])).toBe(
+        'first problem; second problem',
+      )
+    })
+
+    it('falls back to statusText for an empty or unusable detail array', async () => {
+      expect(await messageFor([])).toBe('Unprocessable Entity')
+      expect(await messageFor([{ type: 'value_error' }])).toBe('Unprocessable Entity')
+    })
+  })
 })

@@ -3,6 +3,8 @@ import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi } from 'vitest'
 import { MoveList } from './MoveList'
 import type { MoveItem } from './MoveList'
+import { STANDARD_START_POSITION } from './startPosition'
+import type { StartPosition } from './startPosition'
 
 /** Generate a list of N dummy half-moves. */
 function makeMoves(count: number): MoveItem[] {
@@ -135,5 +137,132 @@ describe('MoveList', () => {
 
     expect(scrollIntoViewSpy).not.toHaveBeenCalled()
     scrollIntoViewSpy.mockRestore()
+  })
+
+  // -------------------------------------------------------------------------
+  // Non-standard starting positions (opening-book FENs)
+  // -------------------------------------------------------------------------
+
+  describe('with a Black-to-move starting position', () => {
+    // The position after 1. e4 — Black to move, still full-move 1 (a FEN's
+    // full-move counter increments only after Black has played). The game's
+    // recorded moves therefore begin with Black's reply.
+    const blackToMove: StartPosition = { blackToMove: true, fullMoveNumber: 1 }
+
+    // The Ruy Lopez continued from that position: the recorded moves are
+    // Black's e5, then White's Nf3, Black's Nc6, White's Bb5. Correct
+    // rendering is `1... e5`, `2. Nf3 Nc6`, `3. Bb5`.
+    const blackFirstMoves: MoveItem[] = [
+      { san: 'e5' },
+      { san: 'Nf3' },
+      { san: 'Nc6' },
+      { san: 'Bb5' },
+    ]
+
+    it('numbers the first Black move as "1..." rather than "1."', () => {
+      render(<MoveList moves={blackFirstMoves} currentMoveIndex={-1} startPosition={blackToMove} />)
+
+      expect(screen.getByText('1...')).toBeInTheDocument()
+      expect(screen.queryByText('1.')).not.toBeInTheDocument()
+    })
+
+    it('pairs every following move onto the correct full move', () => {
+      render(<MoveList moves={blackFirstMoves} currentMoveIndex={-1} startPosition={blackToMove} />)
+
+      expect(screen.getByText('2.')).toBeInTheDocument()
+      expect(screen.getByText('3.')).toBeInTheDocument()
+      // Three rows, exactly one of which is the leading Black-only row.
+      expect(screen.getAllByText(/^\d+\.$/)).toHaveLength(2)
+      expect(screen.getAllByText(/^\d+\.\.\.$/)).toHaveLength(1)
+    })
+
+    it('renders the leading Black move alone on its own row', () => {
+      render(<MoveList moves={blackFirstMoves} currentMoveIndex={-1} startPosition={blackToMove} />)
+
+      const firstRow = screen.getByText('1...').closest('div')
+      expect(firstRow).not.toBeNull()
+      const rowButtons = firstRow?.querySelectorAll('button') ?? []
+      expect(rowButtons).toHaveLength(1)
+      expect(rowButtons[0]).toHaveTextContent('e5')
+
+      // ...and the next row carries White's move followed by Black's.
+      const secondRow = screen.getByText('2.').closest('div')
+      const secondRowButtons = secondRow?.querySelectorAll('button') ?? []
+      expect(secondRowButtons).toHaveLength(2)
+      expect(secondRowButtons[0]).toHaveTextContent('Nf3')
+      expect(secondRowButtons[1]).toHaveTextContent('Nc6')
+    })
+
+    it('still highlights the move at currentMoveIndex', () => {
+      render(<MoveList moves={blackFirstMoves} currentMoveIndex={0} startPosition={blackToMove} />)
+
+      expect(screen.getByText('e5').closest('button')).toHaveClass('bg-blue-600')
+      expect(screen.getByText('Nf3').closest('button')).not.toHaveClass('bg-blue-600')
+    })
+
+    it('reports unshifted move indices to onMoveClick', async () => {
+      const user = userEvent.setup()
+      const onMoveClick = vi.fn()
+      render(
+        <MoveList
+          moves={blackFirstMoves}
+          currentMoveIndex={-1}
+          startPosition={blackToMove}
+          onMoveClick={onMoveClick}
+        />,
+      )
+
+      await user.click(screen.getByText('e5'))
+      expect(onMoveClick).toHaveBeenCalledWith(0)
+
+      await user.click(screen.getByText('Nf3'))
+      expect(onMoveClick).toHaveBeenCalledWith(1)
+    })
+  })
+
+  describe('with a starting full-move number other than 1', () => {
+    it('numbers from the starting full move for a White-to-move start', () => {
+      render(
+        <MoveList
+          moves={sampleMoves}
+          currentMoveIndex={-1}
+          startPosition={{ blackToMove: false, fullMoveNumber: 12 }}
+        />,
+      )
+
+      expect(screen.getByText('12.')).toBeInTheDocument()
+      expect(screen.getByText('13.')).toBeInTheDocument()
+      expect(screen.getByText('14.')).toBeInTheDocument()
+      expect(screen.queryByText('1.')).not.toBeInTheDocument()
+    })
+
+    it('numbers from the starting full move for a Black-to-move start', () => {
+      render(
+        <MoveList
+          moves={sampleMoves}
+          currentMoveIndex={-1}
+          startPosition={{ blackToMove: true, fullMoveNumber: 12 }}
+        />,
+      )
+
+      expect(screen.getByText('12...')).toBeInTheDocument()
+      expect(screen.getByText('13.')).toBeInTheDocument()
+      expect(screen.getByText('14.')).toBeInTheDocument()
+    })
+  })
+
+  it('defaults to the standard start when no startPosition is given', () => {
+    const { unmount } = render(<MoveList moves={sampleMoves} currentMoveIndex={-1} />)
+    const implicit = screen.getAllByText(/^\d+\.$/).map((el) => el.textContent)
+    unmount()
+
+    render(
+      <MoveList
+        moves={sampleMoves}
+        currentMoveIndex={-1}
+        startPosition={STANDARD_START_POSITION}
+      />,
+    )
+    expect(screen.getAllByText(/^\d+\.$/).map((el) => el.textContent)).toEqual(implicit)
   })
 })

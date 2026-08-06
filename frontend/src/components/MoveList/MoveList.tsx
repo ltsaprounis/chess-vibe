@@ -1,4 +1,10 @@
 import { useEffect, useRef } from 'react'
+import {
+  STANDARD_START_POSITION,
+  fullMoveNumberAt,
+  isBlackMoveAt,
+  type StartPosition,
+} from './startPosition'
 
 export interface MoveItem {
   san: string
@@ -8,27 +14,45 @@ export interface MoveItem {
 export interface MoveListProps {
   moves: MoveItem[]
   currentMoveIndex: number
+  /**
+   * Position `moves[0]` was played from. Defaults to the standard initial
+   * position, which is what a game started from scratch uses.
+   */
+  startPosition?: StartPosition
   onMoveClick?: (index: number) => void
 }
 
-interface MovePair {
-  moveNumber: number
-  white: { san: string; annotation?: string; index: number }
-  black?: { san: string; annotation?: string; index: number }
+interface MoveCell {
+  san: string
+  annotation?: string
+  index: number
 }
 
-function groupMoves(moves: MoveItem[]): MovePair[] {
-  const pairs: MovePair[] = []
-  for (let i = 0; i < moves.length; i += 2) {
-    const white = moves[i]
-    const black = moves[i + 1]
-    pairs.push({
-      moveNumber: Math.floor(i / 2) + 1,
-      white: { san: white.san, annotation: white.annotation, index: i },
-      black: black ? { san: black.san, annotation: black.annotation, index: i + 1 } : undefined,
-    })
-  }
-  return pairs
+interface MoveRow {
+  moveNumber: number
+  white?: MoveCell
+  black?: MoveCell
+}
+
+/**
+ * Group half-moves into one row per full move. Only the first row can lack a
+ * White move — that is the Black-to-move start — since every later full move
+ * begins with White by definition.
+ */
+function groupMoves(moves: MoveItem[], start: StartPosition): MoveRow[] {
+  const rows: MoveRow[] = []
+  moves.forEach((move, index) => {
+    const cell: MoveCell = { san: move.san, annotation: move.annotation, index }
+    const moveNumber = fullMoveNumberAt(index, start)
+    if (!isBlackMoveAt(index, start)) {
+      rows.push({ moveNumber, white: cell })
+      return
+    }
+    const openRow = rows[rows.length - 1]
+    if (openRow?.moveNumber === moveNumber) openRow.black = cell
+    else rows.push({ moveNumber, black: cell })
+  })
+  return rows
 }
 
 /** Threshold in pixels — auto-scroll only when within this distance of the bottom. */
@@ -37,6 +61,7 @@ const SCROLL_THRESHOLD = 50
 export function MoveList({
   moves,
   currentMoveIndex,
+  startPosition = STANDARD_START_POSITION,
   onMoveClick,
 }: MoveListProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -62,25 +87,35 @@ export function MoveList({
     return <div className="p-4 text-gray-400">No moves</div>
   }
 
-  const pairs = groupMoves(moves)
+  const rows = groupMoves(moves, startPosition)
 
   return (
     <div ref={containerRef} className="h-full overflow-y-auto rounded bg-gray-800 p-2 text-sm">
-      {pairs.map((pair) => (
-        <div key={pair.moveNumber} className="flex items-baseline gap-1 py-0.5">
-          <span className="w-8 shrink-0 text-right text-gray-500">{pair.moveNumber}.</span>
-          <MoveButton
-            san={pair.white.san}
-            annotation={pair.white.annotation}
-            isActive={pair.white.index === currentMoveIndex}
-            onClick={() => onMoveClick?.(pair.white.index)}
-          />
-          {pair.black && (
+      {rows.map(({ moveNumber, white, black }) => (
+        <div key={moveNumber} className="flex items-baseline gap-1 py-0.5">
+          {/*
+           * `min-w-8` rather than a fixed width: a leading Black-only row is
+           * labelled `12...`, which is wider than the `12.` the column was
+           * sized for. Standard games are unaffected — their labels all fit
+           * the same 2rem minimum.
+           */}
+          <span className="min-w-8 shrink-0 whitespace-nowrap text-right text-gray-500">
+            {white ? `${moveNumber}.` : `${moveNumber}...`}
+          </span>
+          {white && (
             <MoveButton
-              san={pair.black.san}
-              annotation={pair.black.annotation}
-              isActive={pair.black.index === currentMoveIndex}
-              onClick={() => onMoveClick?.(pair.black.index)}
+              san={white.san}
+              annotation={white.annotation}
+              isActive={white.index === currentMoveIndex}
+              onClick={() => onMoveClick?.(white.index)}
+            />
+          )}
+          {black && (
+            <MoveButton
+              san={black.san}
+              annotation={black.annotation}
+              isActive={black.index === currentMoveIndex}
+              onClick={() => onMoveClick?.(black.index)}
             />
           )}
         </div>
