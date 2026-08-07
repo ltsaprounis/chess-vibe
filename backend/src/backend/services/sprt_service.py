@@ -59,6 +59,9 @@ class _RunningTest:
         subscribers: WebSocket queues awaiting updates.
         monitor_task: Background task reading stdout JSON-lines.
         stderr_task: Background task draining stderr.
+        cancel_requested: Whether we signalled this run to stop. Lets
+            :meth:`SPRTService._monitor` tell a deliberate cancel from a
+            crash even when the runner dies before saying anything.
     """
 
     test_id: str
@@ -69,6 +72,7 @@ class _RunningTest:
     )
     monitor_task: asyncio.Task[None] | None = None
     stderr_task: asyncio.Task[None] | None = None
+    cancel_requested: bool = False
 
 
 class SPRTService:
@@ -257,6 +261,7 @@ class SPRTService:
 
         try:
             running.process.send_signal(signal.SIGTERM)
+            running.cancel_requested = True
             logger.info("Sent SIGTERM to SPRT test %s", test_id)
             return True
         except ProcessLookupError:
@@ -302,6 +307,7 @@ class SPRTService:
     async def shutdown(self) -> None:
         """Terminate all running SPRT subprocesses."""
         for running in list(self._running.values()):
+            running.cancel_requested = True
             try:
                 running.process.terminate()
                 await asyncio.wait_for(running.process.wait(), timeout=5.0)
@@ -313,8 +319,21 @@ class SPRTService:
     # -- internal ---------------------------------------------------------
 
     async def _monitor(self, running: _RunningTest) -> None:
-        """Read JSON-lines from the subprocess stdout and dispatch updates."""
+        """Read JSON-lines from the subprocess stdout and dispatch updates.
+
+        The runner emits ``complete`` only when SPRT reaches a decision, and
+        ``interrupted`` only on SIGINT/SIGTERM. Every other way it can stop —
+        a fail-fast startup error, every worker dying (which exits 0), a
+        SIGKILL — produces no terminal message at all, so the terminal status
+        is decided from process exit rather than from the stream.
+
+        ``error`` deliberately does not end the test: the runner emits one per
+        dead worker and per failed game and then carries on, so treating it as
+        terminal would fail tests that go on to reach a decision.
+        """
         assert running.process.stdout is not None
+
+        final_status: SPRTStatus | None = None
 
         try:
             while True:
@@ -347,8 +366,12 @@ class SPRTService:
                     self._update_test_from_progress(running)
 
                 elif msg_type == "complete":
-                    result_str = msg.get("result", "")
-                    self._complete_test(running, result_str)
+                    final_status = SPRTStatus.COMPLETED
+                    self._finalise_test(running, final_status, msg.get("result", ""))
+
+                elif msg_type == "interrupted":
+                    final_status = SPRTStatus.CANCELLED
+                    self._finalise_test(running, final_status)
 
                 # Broadcast to subscribers
                 for queue in running.subscribers:
@@ -359,6 +382,23 @@ class SPRTService:
         finally:
             await running.process.wait()
             self._running.pop(running.test_id, None)
+
+            if final_status is None:
+                final_status = (
+                    SPRTStatus.CANCELLED if running.cancel_requested else SPRTStatus.FAILED
+                )
+                logger.warning(
+                    "SPRT test %s ended without a terminal message (exit=%s); marking %s",
+                    running.test_id,
+                    running.process.returncode,
+                    final_status.value,
+                )
+                self._finalise_test(running, final_status)
+
+            # Subscribers block on an empty queue, so the WebSocket handler
+            # needs an explicit end-of-stream to close on.
+            for queue in running.subscribers:
+                queue.put_nowait({"type": "test_finished", "status": final_status.value})
 
     async def _drain_stderr(self, running: _RunningTest) -> None:
         """Read and log stderr from the SPRT runner subprocess to prevent pipe deadlock."""
@@ -402,8 +442,18 @@ class SPRTService:
         except KeyError:
             logger.warning("Test %s not found during progress update", running.test_id)
 
-    def _complete_test(self, running: _RunningTest, result_str: str) -> None:
-        """Mark a test as completed in the repository."""
+    def _finalise_test(
+        self, running: _RunningTest, status: SPRTStatus, result_str: str = ""
+    ) -> None:
+        """Write a terminal *status* for a test to the repository.
+
+        Args:
+            running: The test whose run has ended.
+            status: Terminal status to persist.
+            result_str: SPRT outcome from a ``complete`` message, if any.
+                Only ``complete`` carries one; every other terminal path
+                leaves ``result`` null.
+        """
         test = self._test_repo.get_sprt_test(running.test_id)
         if test is None:
             return
@@ -422,7 +472,7 @@ class SPRTService:
             alpha=test.alpha,
             beta=test.beta,
             created_at=test.created_at,
-            status=SPRTStatus.COMPLETED,
+            status=status,
             wins=running.progress.wins,
             losses=running.progress.losses,
             draws=running.progress.draws,
@@ -433,4 +483,4 @@ class SPRTService:
         try:
             self._test_repo.update_sprt_results(updated)
         except KeyError:
-            logger.warning("Test %s not found during completion", running.test_id)
+            logger.warning("Test %s not found during finalisation", running.test_id)

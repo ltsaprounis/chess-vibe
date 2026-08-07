@@ -84,6 +84,35 @@ class TestSPRTWebSocket:
 
         mock_sprt_service.unsubscribe.assert_called_once()
 
+    def test_test_finished_closes_the_stream(
+        self,
+        ws_client: TestClient,
+        mock_sprt_service: MagicMock,
+    ) -> None:
+        """A run that ends without ``complete`` must still close the socket.
+
+        ``queue.get()`` blocks forever otherwise, leaking the connection and
+        its subscriber entry for every test that fails or is cancelled.
+        """
+        mock_queue = AsyncMock()
+        mock_queue.get = AsyncMock(
+            side_effect=[
+                {"type": "error", "message": "Failed to resolve engines"},
+                {"type": "test_finished", "status": "failed"},
+            ]
+        )
+        mock_sprt_service.subscribe = MagicMock(return_value=mock_queue)
+
+        with ws_client.websocket_connect("/ws/sprt/test-fail") as ws:
+            error = ws.receive_json()
+            finished = ws.receive_json()
+
+        assert error["type"] == "error"
+        assert finished["type"] == "test_finished"
+        assert finished["status"] == "failed"
+        assert mock_queue.get.await_count == 2
+        mock_sprt_service.unsubscribe.assert_called_once()
+
     def test_multiple_progress_messages_relayed(
         self,
         ws_client: TestClient,

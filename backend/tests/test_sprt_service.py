@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import backend.services.sprt_service as _sprt_mod
@@ -99,6 +102,194 @@ class TestSPRTServiceProperties:
         service = SPRTService(repo)
         result = await service.cancel_test("nonexistent")
         assert result is False
+
+
+def _json_line(**fields: Any) -> bytes:
+    """Encode *fields* as one JSON-lines message from the runner."""
+    return json.dumps(fields).encode() + b"\n"
+
+
+class TestSPRTServiceMonitorTerminalStatus:
+    """Tests that ``_monitor`` always writes a terminal status.
+
+    The runner emits ``complete`` only when SPRT reaches a decision. Every
+    other way it can stop — a fatal error, every worker dying (which exits
+    0), SIGTERM, SIGKILL — used to leave the record at ``RUNNING`` forever,
+    un-cancellable because ``_running`` had already been popped.
+    """
+
+    @pytest.fixture
+    def sprt_repo(self) -> MagicMock:
+        repo = MagicMock()
+        repo.get_sprt_test = MagicMock(
+            return_value=SPRTTest(
+                id="test-1",
+                engine_a="a",
+                engine_b="b",
+                time_control=FixedTimeControl(movetime_ms=100),
+                elo0=0.0,
+                elo1=5.0,
+                alpha=0.05,
+                beta=0.05,
+                created_at=datetime(2024, 1, 1, tzinfo=UTC),
+                status=SPRTStatus.RUNNING,
+            )
+        )
+        repo.update_sprt_results = MagicMock()
+        return repo
+
+    @staticmethod
+    def _running(lines: list[bytes], *, returncode: int = 0) -> Any:
+        stdout = MagicMock()
+        stdout.readline = AsyncMock(side_effect=[*lines, b""])
+        process = MagicMock()
+        process.stdout = stdout
+        process.wait = AsyncMock(return_value=returncode)
+        process.returncode = returncode
+        return _RunningTest(test_id="test-1", process=process)
+
+    @staticmethod
+    def _final_status(sprt_repo: MagicMock) -> SPRTStatus:
+        assert sprt_repo.update_sprt_results.call_args is not None
+        status: SPRTStatus = sprt_repo.update_sprt_results.call_args[0][0].status
+        return status
+
+    @pytest.mark.asyncio
+    async def test_complete_marks_completed(self, sprt_repo: MagicMock) -> None:
+        running = self._running([_json_line(type="complete", result="H1", total_games=10, llr=3.0)])
+        service = SPRTService(sprt_repo)
+
+        await service._monitor(running)  # pyright: ignore[reportPrivateUsage]
+
+        assert self._final_status(sprt_repo) == SPRTStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_interrupted_marks_cancelled(self, sprt_repo: MagicMock) -> None:
+        """SIGTERM from cancel_test makes the runner emit ``interrupted``."""
+        running = self._running([_json_line(type="interrupted", games_played=4)], returncode=1)
+        service = SPRTService(sprt_repo)
+
+        await service._monitor(running)  # pyright: ignore[reportPrivateUsage]
+
+        assert self._final_status(sprt_repo) == SPRTStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_fatal_error_exit_marks_failed(self, sprt_repo: MagicMock) -> None:
+        """A fail-fast runner exit emits ``error`` and never ``complete``."""
+        running = self._running(
+            [_json_line(type="error", message="Failed to resolve engines: no such engine")],
+            returncode=1,
+        )
+        service = SPRTService(sprt_repo)
+
+        await service._monitor(running)  # pyright: ignore[reportPrivateUsage]
+
+        assert self._final_status(sprt_repo) == SPRTStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_clean_exit_without_complete_marks_failed(self, sprt_repo: MagicMock) -> None:
+        """An all-workers-died abort breaks the runner's loop but still exits 0."""
+        running = self._running(
+            [_json_line(type="error", message="All workers died unexpectedly")],
+            returncode=0,
+        )
+        service = SPRTService(sprt_repo)
+
+        await service._monitor(running)  # pyright: ignore[reportPrivateUsage]
+
+        assert self._final_status(sprt_repo) == SPRTStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_silent_death_marks_failed(self, sprt_repo: MagicMock) -> None:
+        """SIGKILL leaves no output at all."""
+        running = self._running([], returncode=-9)
+        service = SPRTService(sprt_repo)
+
+        await service._monitor(running)  # pyright: ignore[reportPrivateUsage]
+
+        assert self._final_status(sprt_repo) == SPRTStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_silent_death_after_cancel_marks_cancelled(self, sprt_repo: MagicMock) -> None:
+        """A cancelled run that dies before emitting ``interrupted`` is still a cancel."""
+        running = self._running([], returncode=-15)
+        running.cancel_requested = True
+        service = SPRTService(sprt_repo)
+
+        await service._monitor(running)  # pyright: ignore[reportPrivateUsage]
+
+        assert self._final_status(sprt_repo) == SPRTStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_nonfatal_error_does_not_end_the_test(self, sprt_repo: MagicMock) -> None:
+        """``error`` is per-game and non-fatal at 2 of its 4 runner call sites.
+
+        A single dead worker must not mark the whole test FAILED — the runner
+        carries on and can still reach a decision.
+        """
+        running = self._running(
+            [
+                _json_line(type="error", message="Worker for game g1 died unexpectedly (pid=7)"),
+                _json_line(type="progress", wins=5, losses=3, draws=2, llr=1.0, games_total=10),
+                _json_line(type="complete", result="H1", total_games=10, llr=3.0),
+            ]
+        )
+        service = SPRTService(sprt_repo)
+
+        await service._monitor(running)  # pyright: ignore[reportPrivateUsage]
+
+        assert self._final_status(sprt_repo) == SPRTStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_broadcasts_test_finished_to_subscribers(self, sprt_repo: MagicMock) -> None:
+        """Without a terminal message the WS handler's queue.get() blocks forever."""
+        running = self._running([_json_line(type="error", message="boom")], returncode=1)
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        running.subscribers.append(queue)
+        service = SPRTService(sprt_repo)
+
+        await service._monitor(running)  # pyright: ignore[reportPrivateUsage]
+
+        assert queue.get_nowait()["type"] == "error"
+        finished = queue.get_nowait()
+        assert finished["type"] == "test_finished"
+        assert finished["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_removes_test_from_running(self, sprt_repo: MagicMock) -> None:
+        running = self._running([], returncode=1)
+        service = SPRTService(sprt_repo)
+        service._running["test-1"] = running  # pyright: ignore[reportPrivateUsage]
+
+        await service._monitor(running)  # pyright: ignore[reportPrivateUsage]
+
+        assert service.running_tests == []
+
+
+class TestSPRTServiceCancelFlag:
+    """Tests that a deliberate cancel is distinguishable from a crash."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_test_records_the_request(self) -> None:
+        process = MagicMock()
+        process.send_signal = MagicMock()
+        running = _RunningTest(test_id="test-1", process=process)
+        service = SPRTService(MagicMock())
+        service._running["test-1"] = running  # pyright: ignore[reportPrivateUsage]
+
+        assert await service.cancel_test("test-1") is True
+        assert running.cancel_requested is True
+
+    @pytest.mark.asyncio
+    async def test_failed_signal_does_not_record_a_cancel(self) -> None:
+        process = MagicMock()
+        process.send_signal = MagicMock(side_effect=ProcessLookupError)
+        running = _RunningTest(test_id="test-1", process=process)
+        service = SPRTService(MagicMock())
+        service._running["test-1"] = running  # pyright: ignore[reportPrivateUsage]
+
+        assert await service.cancel_test("test-1") is False
+        assert running.cancel_requested is False
 
 
 class TestSPRTServiceStderr:
