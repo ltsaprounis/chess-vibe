@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -12,6 +13,7 @@ from sprt_runner.adjudication import (
     AdjudicationConfig,
     AdjudicationType,
     check_adjudication,
+    validate_syzygy_path,
 )
 
 
@@ -326,3 +328,121 @@ class TestSyzygyAdjudication:
             check_adjudication(  # type: ignore[call-arg]
                 [], [], move_number=100, config=config, board=board
             )
+
+    def test_syzygy_cursed_win_is_draw(self, tmp_path: Path) -> None:
+        """WDL == 1 (cursed win): mate is forcible but takes more than fifty
+        moves to convert. play_game() enforces is_fifty_moves() as an automatic
+        draw, so we adjudicate it as a draw rather than a decisive win."""
+        config = AdjudicationConfig(
+            syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        board = chess.Board("8/8/8/8/8/8/1k6/KQ6 w - - 0 1")
+        mock_tb = MagicMock()
+        mock_tb.probe_wdl.return_value = 1  # Cursed win
+
+        result = check_adjudication(
+            [], [], move_number=100, config=config, board=board, tablebase=mock_tb
+        )
+
+        assert result is not None
+        assert result.adjudication_type == AdjudicationType.DRAW
+
+    def test_syzygy_blessed_loss_is_draw(self, tmp_path: Path) -> None:
+        """WDL == -1 (blessed loss): the mirror of a cursed win — the side to
+        move is theoretically lost but the fifty-move rule can save it, so
+        this is a draw, not a decisive loss."""
+        config = AdjudicationConfig(
+            syzygy_path=tmp_path, win_consecutive_moves=0, draw_consecutive_moves=0
+        )
+        board = chess.Board("8/8/8/8/8/8/1k6/KQ6 w - - 0 1")
+        mock_tb = MagicMock()
+        mock_tb.probe_wdl.return_value = -1  # Blessed loss
+
+        result = check_adjudication(
+            [], [], move_number=100, config=config, board=board, tablebase=mock_tb
+        )
+
+        assert result is not None
+        assert result.adjudication_type == AdjudicationType.DRAW
+
+
+class TestValidateSyzygyPath:
+    """Tests for validate_syzygy_path — fail-fast startup validation (issue #173).
+
+    An explicitly-supplied ``--syzygy-path`` that is unusable must fail at
+    startup rather than silently disabling tablebase adjudication for an
+    entire multi-hour SPRT run.
+    """
+
+    def test_nonexistent_path_raises(self, tmp_path: Path) -> None:
+        missing = tmp_path / "does-not-exist"
+        with pytest.raises(ValueError, match="not a directory"):
+            validate_syzygy_path(str(missing))
+
+    def test_file_not_directory_raises(self, tmp_path: Path) -> None:
+        file_path = tmp_path / "not-a-directory.txt"
+        file_path.write_text("hello")
+        with pytest.raises(ValueError, match="not a directory"):
+            validate_syzygy_path(str(file_path))
+
+    def test_empty_directory_raises(self, tmp_path: Path) -> None:
+        empty_dir = tmp_path / "empty-tables"
+        empty_dir.mkdir()
+        with pytest.raises(ValueError, match="no WDL tablebase files"):
+            validate_syzygy_path(str(empty_dir))
+
+    def test_dtz_only_directory_raises(self, tmp_path: Path) -> None:
+        """A DTZ-only directory has no WDL tables, so every probe would no-op.
+
+        The standard Syzygy distribution splits tables into sibling
+        ``3-4-5-wdl/`` and ``3-4-5-dtz/`` directories, so pointing at the
+        DTZ half is a realistic mistake. ``_check_syzygy`` only ever calls
+        ``probe_wdl``, so such a directory must be rejected even though it
+        is non-empty.
+        """
+        dtz_dir = tmp_path / "3-4-5-dtz"
+        dtz_dir.mkdir()
+        (dtz_dir / "KQvK.rtbz").touch()
+        (dtz_dir / "KRvK.rtbz").touch()
+
+        with pytest.raises(ValueError, match="no WDL tablebase files"):
+            validate_syzygy_path(str(dtz_dir))
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses directory permissions",
+    )
+    def test_unreadable_directory_raises_value_error(self, tmp_path: Path) -> None:
+        """An unreadable directory must surface as ValueError, not OSError.
+
+        ``Path.is_dir()`` swallows the permission error and returns True, so
+        the failure only appears inside ``add_directory``. main() catches
+        ValueError alone, so an escaping PermissionError would exit with a
+        traceback instead of the contracted JSON error line.
+        """
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o000)
+        try:
+            with pytest.raises(ValueError, match="Cannot read Syzygy path"):
+                validate_syzygy_path(str(locked))
+        finally:
+            locked.chmod(0o755)
+
+    def test_empty_value_raises(self) -> None:
+        """``--syzygy-path ""`` must fail rather than silently disable.
+
+        An unset shell variable in a wrapper script (``--syzygy-path
+        "$SYZYGY_DIR"``) is exactly the silent-no-op this flag's validation
+        exists to prevent. Note ``Path("")`` is ``Path(".")``, so this has
+        to be caught before the string becomes a Path.
+        """
+        with pytest.raises(ValueError, match="empty"):
+            validate_syzygy_path("")
+
+    def test_directory_with_wdl_table_returns_path(self, tmp_path: Path) -> None:
+        tb_dir = tmp_path / "tables"
+        tb_dir.mkdir()
+        (tb_dir / "KQvK.rtbw").touch()
+
+        assert validate_syzygy_path(str(tb_dir)) == tb_dir

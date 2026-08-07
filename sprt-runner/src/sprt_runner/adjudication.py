@@ -64,6 +64,57 @@ class AdjudicationConfig:
     syzygy_path: Path | None = None
 
 
+def validate_syzygy_path(raw_path: str) -> Path:
+    """Validate an explicitly-supplied Syzygy tablebase path at startup.
+
+    An unusable ``--syzygy-path`` must fail fast, before any game runs,
+    rather than silently disabling tablebase adjudication: opening an
+    empty or wrong-nesting-level directory succeeds and every probe then
+    returns nothing for the entire (potentially multi-hour) run.
+
+    Takes the raw CLI string rather than a ``Path`` so that an empty value
+    is distinguishable from an absent flag — ``Path("")`` is ``Path(".")``,
+    which would silently validate the current working directory.
+
+    Only WDL tables are counted. ``_check_syzygy`` calls ``probe_wdl`` and
+    never touches DTZ, and the standard distribution splits tables into
+    sibling ``3-4-5-wdl/`` and ``3-4-5-dtz/`` directories — so a DTZ-only
+    directory is non-empty but still unusable.
+
+    Args:
+        raw_path: The user-supplied ``--syzygy-path`` value.
+
+    Returns:
+        The validated directory as a ``Path``.
+
+    Raises:
+        ValueError: If the value is empty, is not a readable directory, or
+            names a directory containing no WDL tablebase files.
+    """
+    if not raw_path.strip():
+        raise ValueError("Syzygy path is empty")
+
+    path = Path(raw_path)
+    if not path.is_dir():
+        raise ValueError(f"Syzygy path is not a directory: {path}")
+
+    tablebase = chess.syzygy.Tablebase()
+    try:
+        # load_dtz=False so .rtbz files are not counted as usable tables.
+        wdl_count = tablebase.add_directory(str(path), load_dtz=False)
+    except OSError as e:
+        # Path.is_dir() swallows permission errors, so an unreadable
+        # directory only fails here. main() catches ValueError alone.
+        raise ValueError(f"Cannot read Syzygy path {path}: {e}") from e
+    finally:
+        tablebase.close()
+
+    if wdl_count == 0:
+        raise ValueError(f"Syzygy path contains no WDL tablebase files: {path}")
+
+    return path
+
+
 def check_adjudication(
     white_scores: list[int],
     black_scores: list[int],
@@ -227,7 +278,12 @@ def _check_syzygy(
         logger.debug("Syzygy probe failed for position", exc_info=True)
         return None
 
-    if wdl > 0:
+    # probe_wdl returns 2=win, 1=cursed win, 0=draw, -1=blessed loss, -2=loss.
+    # A cursed win / blessed loss is forcible in theory but needs more than
+    # fifty moves to convert, and _play_game() already scores is_fifty_moves()
+    # as an automatic draw — so ±1 are unconvertible here by construction and
+    # must adjudicate as draws. Do not simplify back to wdl > 0 / wdl < 0.
+    if wdl >= 2:
         # Side to move wins
         if board.turn == chess.WHITE:
             return AdjudicationResult(
@@ -239,7 +295,7 @@ def _check_syzygy(
             reason="Syzygy tablebase: black wins",
         )
 
-    if wdl < 0:
+    if wdl <= -2:
         # Side to move loses
         if board.turn == chess.WHITE:
             return AdjudicationResult(
@@ -251,7 +307,7 @@ def _check_syzygy(
             reason="Syzygy tablebase: white wins",
         )
 
-    # WDL == 0: draw
+    # wdl in {-1, 0, 1}: draw (blessed loss, true draw, or cursed win)
     return AdjudicationResult(
         adjudication_type=AdjudicationType.DRAW,
         reason="Syzygy tablebase: draw",
