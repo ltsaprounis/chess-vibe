@@ -39,7 +39,7 @@ from shared.time_control import (
 )
 from shared.uci_client import UCIClient
 
-from sprt_runner.adjudication import AdjudicationConfig
+from sprt_runner.adjudication import AdjudicationConfig, validate_syzygy_path
 from sprt_runner.game import GameConfig, play_game
 from sprt_runner.openings import OpeningPair, load_openings, make_opening_pairs
 from sprt_runner.sprt import SPRTDecision, sprt_test
@@ -927,6 +927,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--adjudicate-draw", type=int, default=10, help="Draw adjudication threshold (cp)"
     )
     run_parser.add_argument(
+        "--syzygy-path", type=str, default=None, help="Path to Syzygy tablebase directory"
+    )
+    run_parser.add_argument(
         "--keep-worktrees",
         action="store_true",
         default=False,
@@ -970,9 +973,21 @@ def main() -> None:
         print(format_error_message(str(e)), flush=True)
         sys.exit(1)
 
+    # Unlike --book/--output-dir, an explicitly-supplied path is validated
+    # up front: silently running for hours without the adjudication the user
+    # asked for is worse than refusing to start.
+    syzygy_path: Path | None = None
+    if args.syzygy_path is not None:
+        try:
+            syzygy_path = validate_syzygy_path(args.syzygy_path)
+        except ValueError as e:
+            print(format_error_message(str(e)), flush=True)
+            sys.exit(1)
+
     adjudication = AdjudicationConfig(
         win_threshold_cp=args.adjudicate_win,
         draw_threshold_cp=args.adjudicate_draw,
+        syzygy_path=syzygy_path,
     )
 
     run_config = RunConfig(

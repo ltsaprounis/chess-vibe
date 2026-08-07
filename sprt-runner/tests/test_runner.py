@@ -30,6 +30,7 @@ from sprt_runner.runner import (
     format_game_result_message,
     format_interrupted_message,
     format_progress_message,
+    main,
     run_sprt,
     worker_entry,
 )
@@ -1308,6 +1309,158 @@ class TestOutputDirCLI:
             ]
         )
         assert args.output_dir == "/tmp/games"
+
+
+class TestSyzygyPathCLI:
+    """Tests for --syzygy-path CLI argument."""
+
+    def test_syzygy_path_absent(self) -> None:
+        """Without --syzygy-path, the flag should default to None."""
+        parser = build_parser()
+        args = parser.parse_args(["run", "--base", "eng1", "--test", "eng2", "--tc", "depth=1"])
+        assert args.syzygy_path is None
+
+    def test_syzygy_path_present(self) -> None:
+        """With --syzygy-path, the raw string value should be set (not a Path)."""
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "run",
+                "--base",
+                "eng1",
+                "--test",
+                "eng2",
+                "--tc",
+                "depth=1",
+                "--syzygy-path",
+                "/tmp/tables",
+            ]
+        )
+        assert args.syzygy_path == "/tmp/tables"
+
+
+class TestMainSyzygyPathWiring:
+    """main()-level tests proving --syzygy-path reaches AdjudicationConfig.
+
+    A parser-level test alone only proves argparse works — the actual bug
+    in issue #173 was the missing kwarg in main()'s AdjudicationConfig(...)
+    call, which parser tests cannot see. These tests patch run_sprt itself
+    and inspect the RunConfig it is handed instead of executing the game
+    loop.
+    """
+
+    def test_syzygy_path_reaches_adjudication_config(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """--syzygy-path must reach RunConfig.adjudication.syzygy_path."""
+        tb_dir = tmp_path / "tables"
+        tb_dir.mkdir()
+        (tb_dir / "KQvK.rtbw").touch()
+
+        captured: dict[str, RunConfig] = {}
+
+        async def _fake_run_sprt(config: RunConfig) -> None:
+            captured["config"] = config
+
+        monkeypatch.setattr("sprt_runner.runner.run_sprt", _fake_run_sprt)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "sprt_runner",
+                "run",
+                "--base",
+                "eng1",
+                "--test",
+                "eng2",
+                "--tc",
+                "depth=1",
+                "--syzygy-path",
+                str(tb_dir),
+            ],
+        )
+
+        main()
+
+        assert captured["config"].adjudication.syzygy_path == tb_dir
+
+    def test_syzygy_path_absent_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Omitting --syzygy-path must leave syzygy_path as None (default behaviour unchanged)."""
+        captured: dict[str, RunConfig] = {}
+
+        async def _fake_run_sprt(config: RunConfig) -> None:
+            captured["config"] = config
+
+        monkeypatch.setattr("sprt_runner.runner.run_sprt", _fake_run_sprt)
+        monkeypatch.setattr(
+            "sys.argv",
+            ["sprt_runner", "run", "--base", "eng1", "--test", "eng2", "--tc", "depth=1"],
+        )
+
+        main()
+
+        assert captured["config"].adjudication.syzygy_path is None
+
+
+class TestSyzygyPathValidationCLI:
+    """main()-level fail-fast validation of --syzygy-path (issue #173, part B).
+
+    An explicitly-supplied path that is unusable must fail before any game
+    runs, on the same channel (JSON error line on stdout) and with the same
+    exit code as the existing --tc pre-flight check.
+    """
+
+    @staticmethod
+    def _make_bad_path(tmp_path: Path, kind: str) -> str:
+        """Build a --syzygy-path value that must be rejected."""
+        if kind == "missing":
+            return str(tmp_path / "does-not-exist")
+        if kind == "empty-dir":
+            empty_dir = tmp_path / "empty-tables"
+            empty_dir.mkdir()
+            return str(empty_dir)
+        if kind == "dtz-only":
+            dtz_dir = tmp_path / "3-4-5-dtz"
+            dtz_dir.mkdir()
+            (dtz_dir / "KQvK.rtbz").touch()
+            return str(dtz_dir)
+        if kind == "empty-value":
+            return ""
+        raise AssertionError(f"unknown kind: {kind}")
+
+    @pytest.mark.parametrize("kind", ["missing", "empty-dir", "dtz-only", "empty-value"])
+    def test_bad_path_exits_nonzero_with_stdout_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        kind: str,
+    ) -> None:
+        async def _fail_if_called(config: RunConfig) -> None:
+            raise AssertionError("run_sprt must not be reached when validation fails")
+
+        monkeypatch.setattr("sprt_runner.runner.run_sprt", _fail_if_called)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "sprt_runner",
+                "run",
+                "--base",
+                "eng1",
+                "--test",
+                "eng2",
+                "--tc",
+                "depth=1",
+                "--syzygy-path",
+                self._make_bad_path(tmp_path, kind),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code != 0
+        message = json.loads(capsys.readouterr().out.strip())
+        assert message["type"] == "error"
 
 
 class TestWorktreeCleanupAfterSprt:
