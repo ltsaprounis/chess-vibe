@@ -50,6 +50,36 @@ describe('SPRTDashboard', () => {
     expect(screen.getByText('No SPRT tests yet.')).toBeInTheDocument()
   })
 
+  it('badges a failed test distinctly from a cancelled one', () => {
+    render(
+      <SPRTDashboard
+        tests={[
+          makeTest({ id: 't1', status: 'failed' }),
+          makeTest({ id: 't2', status: 'cancelled' }),
+        ]}
+        onCancel={vi.fn()}
+        onSelect={vi.fn()}
+      />,
+    )
+
+    const failed = screen.getByText('failed')
+    const cancelled = screen.getByText('cancelled')
+    expect(failed).toBeInTheDocument()
+    expect(cancelled).toBeInTheDocument()
+    expect(failed.className).not.toEqual(cancelled.className)
+  })
+
+  it('offers no cancel button for a failed test', () => {
+    render(
+      <SPRTDashboard
+        tests={[makeTest({ status: 'failed' })]}
+        onCancel={vi.fn()}
+        onSelect={vi.fn()}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+  })
+
   it('renders a table row per test with W/D/L, LLR, engine pair', () => {
     const tests = [
       makeTest({

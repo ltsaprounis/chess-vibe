@@ -357,6 +357,14 @@ class TestFileSPRTTestRepositoryRoundTrip:
         assert loaded.result == SPRTOutcome.H1
         assert loaded.completed_at == completed
 
+    def test_round_trip_preserves_failed_status(self, tmp_path: Path) -> None:
+        repo = FileSPRTTestRepository(tmp_path)
+        repo.save_sprt_test(_make_sprt_test("test-003", status=SPRTStatus.FAILED))
+
+        loaded = repo.get_sprt_test("test-003")
+        assert loaded is not None
+        assert loaded.status == SPRTStatus.FAILED
+
     def test_creates_meta_json(self, tmp_path: Path) -> None:
         repo = FileSPRTTestRepository(tmp_path)
         repo.save_sprt_test(_make_sprt_test())

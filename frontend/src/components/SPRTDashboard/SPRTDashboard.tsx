@@ -11,6 +11,7 @@ function statusBadge(status: string): React.JSX.Element {
     running: 'bg-blue-600 text-blue-100',
     completed: 'bg-green-700 text-green-100',
     cancelled: 'bg-gray-600 text-gray-200',
+    failed: 'bg-red-800 text-red-100',
   }
   const cls = colors[status] ?? 'bg-gray-600 text-gray-200'
   return (

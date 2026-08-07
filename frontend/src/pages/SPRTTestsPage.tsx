@@ -36,7 +36,20 @@ interface WsErrorMessage {
   message: string
 }
 
-type WsSprtMessage = WsProgressMessage | WsCompleteMessage | WsErrorMessage
+/**
+ * End-of-stream message carrying the test's terminal status.
+ *
+ * The backend sends this once the runner process has exited, on every path
+ * including the ones that never emit `complete` — a fatal error, every
+ * worker dying, a cancel, a kill. `error` is not a substitute: the runner
+ * emits it per dead worker and then carries on.
+ */
+interface WsTestFinishedMessage {
+  type: 'test_finished'
+  status: string
+}
+
+type WsSprtMessage = WsProgressMessage | WsCompleteMessage | WsErrorMessage | WsTestFinishedMessage
 
 // ---------------------------------------------------------------------------
 // Live progress state
@@ -250,6 +263,10 @@ export function SPRTTestsPage(): React.JSX.Element {
         setWsUrl(null)
       } else if (msg.type === 'error') {
         setError(msg.message)
+      } else if (msg.type === 'test_finished') {
+        setTests((prev) =>
+          prev.map((t) => (t.id === activeTestId ? { ...t, status: msg.status } : t)),
+        )
         setWsUrl(null)
       }
     },

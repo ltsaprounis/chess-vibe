@@ -201,6 +201,7 @@ class TestSPRTEnums:
         assert SPRTStatus.RUNNING.value == "running"
         assert SPRTStatus.COMPLETED.value == "completed"
         assert SPRTStatus.CANCELLED.value == "cancelled"
+        assert SPRTStatus.FAILED.value == "failed"
 
     def test_outcome_values(self) -> None:
         assert SPRTOutcome.H0.value == "H0"

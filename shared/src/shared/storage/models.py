@@ -28,11 +28,19 @@ class GameResult(Enum):
 
 
 class SPRTStatus(Enum):
-    """Lifecycle status of an SPRT test."""
+    """Lifecycle status of an SPRT test.
+
+    ``CANCELLED`` means the run was deliberately stopped — by the user, or
+    by a backend restart that orphaned the subprocess. ``FAILED`` means it
+    stopped for any other reason: a fatal runner error, all workers dying,
+    or the process being killed. The two are kept apart because "I stopped
+    this" and "this broke" call for different follow-up.
+    """
 
     RUNNING = "running"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+    FAILED = "failed"
 
 
 class SPRTOutcome(Enum):

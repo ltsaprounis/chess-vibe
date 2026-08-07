@@ -536,6 +536,70 @@ describe('SPRTTestsPage', () => {
     })
   })
 
+  it('marks the row failed when the run ends without completing', async () => {
+    render(<SPRTTestsPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('engine-1 vs engine-2')).toBeInTheDocument()
+    })
+
+    await userEvent.click(screen.getByText('10 / 3 / 5'))
+
+    act(() => {
+      capturedOnMessage?.({ type: 'test_finished', status: 'failed' })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('failed')).toBeInTheDocument()
+    })
+    // A finished run must not still offer to cancel itself.
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+    // ...and this one really is the end of the stream.
+    expect(vi.mocked(useWebSocket).mock.calls.at(-1)?.[0]).toBeNull()
+  })
+
+  it('marks the row cancelled when the run ends as cancelled', async () => {
+    render(<SPRTTestsPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('engine-1 vs engine-2')).toBeInTheDocument()
+    })
+
+    await userEvent.click(screen.getByText('10 / 3 / 5'))
+
+    act(() => {
+      capturedOnMessage?.({ type: 'test_finished', status: 'cancelled' })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('cancelled')).toBeInTheDocument()
+    })
+  })
+
+  it('keeps the row running when a non-fatal error arrives', async () => {
+    // The runner emits "error" per dead worker and carries on, so an error
+    // alone must not retire the row.
+    render(<SPRTTestsPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('engine-1 vs engine-2')).toBeInTheDocument()
+    })
+
+    await userEvent.click(screen.getByText('10 / 3 / 5'))
+
+    act(() => {
+      capturedOnMessage?.({ type: 'error', message: 'Worker for game g1 died' })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('Worker for game g1 died')).toBeInTheDocument()
+    })
+    expect(screen.getByText('running')).toBeInTheDocument()
+    // The stream must stay open — the run is still going, and closing it here
+    // would blank the live view for the rest of the test.
+    expect(vi.mocked(useWebSocket).mock.calls.at(-1)?.[0]).not.toBeNull()
+  })
+
   it('shows error from WebSocket error message', async () => {
     render(<SPRTTestsPage />)
 
