@@ -6,6 +6,8 @@ import { Board } from '../components/Board/Board'
 import { EvalBar } from '../components/EvalBar/EvalBar'
 import { MoveList } from '../components/MoveList/MoveList'
 import type { MoveItem } from '../components/MoveList/MoveList'
+import { isBlackMoveAt, moveLabel, parseStartPosition } from '../components/MoveList/startPosition'
+import type { StartPosition } from '../components/MoveList/startPosition'
 import { EvalGraph } from '../components/EvalGraph/EvalGraph'
 import type { EvalGraphPoint } from '../components/EvalGraph/EvalGraph'
 
@@ -32,24 +34,14 @@ interface WhitePerspectiveScore {
 }
 
 /**
- * True when the side to move in `fen`'s active-colour field is Black.
- * Defaults to White (`false`) for a null/malformed FEN — the standard
- * initial position always has White to move.
- */
-function isBlackToMove(fen: string | null): boolean {
-  return (fen?.split(' ')[1] ?? 'w') === 'b'
-}
-
-/**
  * Eval sign convention: `Move.score_cp` / `Move.score_mate` are stored from
  * the perspective of whichever side made that move (the raw UCI `info
- * score` convention). Moves strictly alternate colour starting from
- * whoever is to move in `start_fen`, so the mover of `moves[index]` is
- * White iff `(index % 2 === 1) !== firstMoverIsBlack` is false — i.e. we
- * cannot assume index 0 is White's move, because `start_fen` (arbitrary
- * opening-book positions, including odd-ply lines) may have Black to move
- * first. `firstMoverIsBlack` must come from the active-colour field of
- * `game.start_fen` (via {@link isBlackToMove}), not be assumed.
+ * score` convention). Moves strictly alternate colour starting from whoever
+ * is to move in `start_fen`, so index 0 cannot be assumed to be White's —
+ * `start_fen` holds arbitrary opening-book positions, including odd-ply
+ * lines with Black to move. The mover therefore comes from
+ * {@link isBlackMoveAt} against the parsed `start_fen`, which is the same
+ * derivation MoveList uses to number the moves.
  *
  * EvalBar and EvalGraph both read scores as "White's advantage" (the
  * conventional way to read an eval bar/graph), so a move played by Black
@@ -58,9 +50,9 @@ function isBlackToMove(fen: string | null): boolean {
 function toWhitePerspective(
   move: Move,
   index: number,
-  firstMoverIsBlack: boolean,
+  startPosition: StartPosition,
 ): WhitePerspectiveScore {
-  const isBlackMove = (index % 2 === 1) !== firstMoverIsBlack
+  const isBlackMove = isBlackMoveAt(index, startPosition)
   const scoreCp = move.score_cp === null ? undefined : isBlackMove ? -move.score_cp : move.score_cp
   const scoreMate =
     move.score_mate === null ? undefined : isBlackMove ? -move.score_mate : move.score_mate
@@ -80,20 +72,6 @@ function formatAnnotation(score: WhitePerspectiveScore): string | undefined {
     return `(−${Math.abs(pawns).toFixed(1)})`
   }
   return undefined
-}
-
-/**
- * Full-move + side label for the status line, e.g. `3.` for a White move
- * or `3...` for a Black move — matching MoveList's own (pre-existing,
- * out-of-scope-here) even-index-is-White pairing convention, so the two
- * displays never disagree with each other even though that shared
- * convention is itself wrong for a Black-to-move `start_fen` (see
- * `toWhitePerspective` above for the eval-sign fix; MoveList's grouping is
- * a separate, pre-existing component this page does not modify).
- */
-function fullMoveLabel(index: number): string {
-  const moveNumber = Math.floor(index / 2) + 1
-  return index % 2 === 0 ? `${moveNumber}.` : `${moveNumber}...`
 }
 
 /**
@@ -233,15 +211,17 @@ function GameReplayView({ id }: GameReplayViewProps): React.JSX.Element {
       ? (game?.start_fen ?? STANDARD_INITIAL_FEN)
       : (moves[currentMoveIndex]?.fen_after ?? STANDARD_INITIAL_FEN)
 
-  // Who moves first is read from `start_fen`'s active-colour field, not
-  // assumed to be White — an opening-book position can have Black to move.
-  // See `toWhitePerspective`'s doc comment.
-  const firstMoverIsBlack = isBlackToMove(game?.start_fen ?? null)
+  // Who moves first, and which full move the game resumes at, are read from
+  // `start_fen` rather than assumed — an opening-book position can have
+  // Black to move and can start well past move 1. This single parse feeds
+  // both the eval signs (`toWhitePerspective`) and the move numbering
+  // (MoveList, and the status line below).
+  const startPosition = parseStartPosition(game?.start_fen)
 
   const currentScore: WhitePerspectiveScore =
     currentMoveIndex === START_POSITION_INDEX || !moves[currentMoveIndex]
       ? {}
-      : toWhitePerspective(moves[currentMoveIndex], currentMoveIndex, firstMoverIsBlack)
+      : toWhitePerspective(moves[currentMoveIndex], currentMoveIndex, startPosition)
 
   const currentMoveHasEval =
     currentMoveIndex !== START_POSITION_INDEX &&
@@ -252,11 +232,11 @@ function GameReplayView({ id }: GameReplayViewProps): React.JSX.Element {
 
   const moveItems: MoveItem[] = moves.map((m, i) => ({
     san: m.san,
-    annotation: formatAnnotation(toWhitePerspective(m, i, firstMoverIsBlack)),
+    annotation: formatAnnotation(toWhitePerspective(m, i, startPosition)),
   }))
 
   const graphPoints: EvalGraphPoint[] = moves.map((m, i) => {
-    const score = toWhitePerspective(m, i, firstMoverIsBlack)
+    const score = toWhitePerspective(m, i, startPosition)
     return {
       scoreCp: score.scoreCp ?? null,
       scoreMate: score.scoreMate ?? null,
@@ -339,6 +319,7 @@ function GameReplayView({ id }: GameReplayViewProps): React.JSX.Element {
               <MoveList
                 moves={moveItems}
                 currentMoveIndex={currentMoveIndex}
+                startPosition={startPosition}
                 onMoveClick={setCurrentMoveIndex}
               />
             </div>
@@ -370,7 +351,7 @@ function GameReplayView({ id }: GameReplayViewProps): React.JSX.Element {
           <p role="status" aria-live="polite" className="mb-4 text-sm text-gray-400">
             {atStart
               ? 'Starting position'
-              : `${fullMoveLabel(currentMoveIndex)} ${moves[currentMoveIndex]?.san ?? ''} — move ${
+              : `${moveLabel(currentMoveIndex, startPosition)} ${moves[currentMoveIndex]?.san ?? ''} — move ${
                   currentMoveIndex + 1
                 } of ${moves.length}`}
           </p>

@@ -44,16 +44,64 @@ export class ApiError extends Error {
 }
 
 /**
+ * Request parts FastAPI prefixes a validation `loc` with. They say where the
+ * value came from, not which field failed, so they are dropped from the
+ * user-facing message: `['body', 'concurrency']` reads as `concurrency`.
+ */
+const REQUEST_PARTS = new Set(['body', 'query', 'path', 'header', 'cookie'])
+
+/**
+ * Render one entry of a FastAPI validation-error array as `field: message`.
+ * Returns an empty string for anything without a usable `msg`, so the caller
+ * can fall back rather than surfacing a fragment of nothing.
+ */
+function formatValidationError(entry: unknown): string {
+  if (typeof entry === 'string') return entry
+  if (typeof entry !== 'object' || entry === null) return ''
+
+  const { loc, msg } = entry as { loc?: unknown; msg?: unknown }
+  if (typeof msg !== 'string' || msg === '') return ''
+
+  const path = Array.isArray(loc)
+    ? loc
+        .filter((part, i) => !(i === 0 && typeof part === 'string' && REQUEST_PARTS.has(part)))
+        .join('.')
+    : ''
+  return path ? `${path}: ${msg}` : msg
+}
+
+/**
+ * Turn a response body's `detail` into a message worth showing.
+ *
+ * A 422 from FastAPI carries an *array* of `{loc, msg, type}` objects rather
+ * than a string; stringifying that naively yields "[object Object]", which
+ * hides which field the backend actually rejected. Returns an empty string
+ * when nothing usable can be extracted, leaving the caller to fall back to
+ * the HTTP status text.
+ */
+function formatDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail.map(formatValidationError).filter(Boolean).join('; ')
+  }
+  // Preserve the previous stringify for primitives; an object detail has no
+  // useful string form, so let the caller fall back instead.
+  if (typeof detail === 'number' || typeof detail === 'boolean') return String(detail)
+  return ''
+}
+
+/**
  * Parse a non-ok response and throw an {@link ApiError}.
  */
 async function handleError(response: Response): Promise<never> {
   let message: string
   try {
     const body: unknown = await response.json()
-    message =
+    const detail =
       typeof body === 'object' && body !== null && 'detail' in body
-        ? String((body as { detail: unknown }).detail)
-        : response.statusText
+        ? (body as { detail: unknown }).detail
+        : undefined
+    message = formatDetail(detail) || response.statusText
   } catch {
     message = response.statusText
   }

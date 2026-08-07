@@ -72,7 +72,16 @@ interface FormErrors {
   elo?: string
   alpha?: string
   beta?: string
+  concurrency?: string
 }
+
+/**
+ * Worker-count bounds, mirroring `SPRTTestCreateRequest.concurrency`
+ * (`ge=1, le=64`) on the backend. Kept in step with it so an out-of-range
+ * value is named here rather than coming back as a 422.
+ */
+const MIN_CONCURRENCY = 1
+const MAX_CONCURRENCY = 64
 
 function validateForm(
   engineA: string,
@@ -82,6 +91,7 @@ function validateForm(
   elo1: number,
   alpha: number,
   beta: number,
+  concurrency: number,
 ): FormErrors {
   const errors: FormErrors = {}
   if (!engineA) errors.engineA = 'Engine A is required'
@@ -90,6 +100,13 @@ function validateForm(
   if (elo1 <= elo0) errors.elo = 'Elo1 must be greater than Elo0'
   if (alpha <= 0 || alpha >= 1) errors.alpha = 'Alpha must be between 0 and 1'
   if (beta <= 0 || beta >= 1) errors.beta = 'Beta must be between 0 and 1'
+  if (
+    !Number.isInteger(concurrency) ||
+    concurrency < MIN_CONCURRENCY ||
+    concurrency > MAX_CONCURRENCY
+  ) {
+    errors.concurrency = `Concurrency must be between ${MIN_CONCURRENCY} and ${MAX_CONCURRENCY}`
+  }
   return errors
 }
 
@@ -280,7 +297,7 @@ export function SPRTTestsPage(): React.JSX.Element {
   )
 
   const handleSubmit = useCallback(async (): Promise<void> => {
-    const errors = validateForm(engineA, engineB, timeControl, elo0, elo1, alpha, beta)
+    const errors = validateForm(engineA, engineB, timeControl, elo0, elo1, alpha, beta, concurrency)
     setFormErrors(errors)
     if (Object.keys(errors).length > 0) return
 
@@ -594,11 +611,15 @@ export function SPRTTestsPage(): React.JSX.Element {
               <input
                 id="concurrency"
                 type="number"
-                min="1"
+                min={MIN_CONCURRENCY}
+                max={MAX_CONCURRENCY}
                 className="w-full rounded bg-gray-700 px-3 py-2 text-white"
                 value={concurrency}
                 onChange={(e) => setConcurrency(Number(e.target.value))}
               />
+              {formErrors.concurrency && (
+                <p className="mt-1 text-xs text-red-400">{formErrors.concurrency}</p>
+              )}
               <HelpText>
                 Number of games to play in parallel. Each worker runs one game at a time.
               </HelpText>

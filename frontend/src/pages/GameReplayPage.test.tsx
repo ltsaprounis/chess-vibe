@@ -581,4 +581,51 @@ describe('GameReplayPage', () => {
     expect(screen.getByText('−3.0')).toBeInTheDocument()
     expect(screen.queryByText('+3.0')).not.toBeInTheDocument()
   })
+
+  // -----------------------------------------------------------------------
+  // Move numbering: also derived from start_fen, shared with MoveList
+  // -----------------------------------------------------------------------
+
+  it('numbers the status line from start_fen when Black moves first', async () => {
+    // Position after 1. e4: Black to move, still full move 1.
+    const blackToMoveStartFen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+    vi.mocked(fetchGame).mockResolvedValue({ ...sampleGame, start_fen: blackToMoveStartFen })
+    const user = userEvent.setup()
+    renderAtPath('/games/game-1')
+    await waitFor(() => expect(screen.getByTestId('chessboard')).toBeInTheDocument())
+
+    // moves[0] is Black's reply, so it is "1...", not "1.".
+    await user.click(screen.getByRole('button', { name: 'Next' }))
+    expect(screen.getByRole('status')).toHaveTextContent('1...')
+    expect(screen.getByRole('status')).toHaveTextContent('move 1 of 5')
+
+    // moves[1] is White's, opening full move 2.
+    await user.click(screen.getByRole('button', { name: 'Next' }))
+    expect(screen.getByRole('status')).toHaveTextContent('2.')
+  })
+
+  it('numbers the move list from start_fen when Black moves first', async () => {
+    const blackToMoveStartFen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+    vi.mocked(fetchGame).mockResolvedValue({ ...sampleGame, start_fen: blackToMoveStartFen })
+    renderAtPath('/games/game-1')
+    await waitFor(() => expect(screen.getByTestId('chessboard')).toBeInTheDocument())
+
+    // 5 half-moves from a Black-to-move start: 1... / 2. / 3. — never "1.".
+    expect(screen.getByText('1...')).toBeInTheDocument()
+    expect(screen.queryByText('1.')).not.toBeInTheDocument()
+    expect(screen.getByText('2.')).toBeInTheDocument()
+    expect(screen.getByText('3.')).toBeInTheDocument()
+  })
+
+  it('numbers from the start_fen full-move counter, not from 1', async () => {
+    // A book line resumed at full move 12, White to move.
+    const midGameStartFen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 12'
+    vi.mocked(fetchGame).mockResolvedValue({ ...sampleGame, start_fen: midGameStartFen })
+    renderAtPath('/games/game-1')
+    await waitFor(() => expect(screen.getByTestId('chessboard')).toBeInTheDocument())
+
+    expect(screen.getByText('12.')).toBeInTheDocument()
+    expect(screen.getByText('14.')).toBeInTheDocument()
+    expect(screen.queryByText('1.')).not.toBeInTheDocument()
+  })
 })
