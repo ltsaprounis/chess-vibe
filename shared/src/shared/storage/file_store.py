@@ -8,6 +8,8 @@ Directory layout::
       sprt-tests/{test-id}/games/{game-id}.eval.json
       play/{game-id}.pgn
       play/{game-id}.eval.json
+      openings/{book-id}.{pgn,epd}
+      openings/{book-id}.meta.json
 
 Atomic writes are achieved via temp-file + ``os.replace``.
 """
@@ -22,7 +24,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from shared.storage.models import (
     Game,
@@ -449,42 +451,72 @@ class FileSPRTTestRepository(SPRTTestRepository):
 class FileOpeningBookRepository(OpeningBookRepository):
     """Flat-file implementation of :class:`OpeningBookRepository`.
 
-    Opening books are stored at ``data_dir/openings/{book-id}.{format}``.
+    Opening books are stored at ``data_dir/openings/{book-id}.{format}``,
+    where ``book-id`` is a generated UUID. The uploaded filename is kept in
+    a ``{book-id}.meta.json`` sidecar rather than in the filename itself, so
+    that a book's ``id`` stays an opaque identifier that both
+    :meth:`list_books` and :meth:`get_book_path` derive from the file stem.
 
     Args:
         data_dir: Root data directory (e.g. ``Path("data")``).
     """
 
     _SUPPORTED_EXTENSIONS = frozenset({".pgn", ".epd"})
+    _METADATA_SUFFIX = ".meta.json"
 
     def __init__(self, data_dir: Path) -> None:
         """Initialise with the root data directory."""
         self._books_dir = data_dir / "openings"
 
     def list_books(self) -> list[OpeningBook]:
-        """List all available opening books."""
-        if not self._books_dir.is_dir():
-            return []
+        """List all available opening books.
 
+        A book's id is its filename stem, so two supported extensions
+        sharing a stem (``dup.pgn`` / ``dup.epd``) would describe one id.
+        Only the first is listed, since only the first is fetchable: ids
+        must be unique for :meth:`get_book_path` to mean anything, and the
+        frontend keys its dropdown on them.
+        """
         books: list[OpeningBook] = []
-        for path in sorted(self._books_dir.iterdir()):
-            if path.is_file() and path.suffix in self._SUPPORTED_EXTENSIONS:
-                books.append(
-                    OpeningBook(
-                        id=path.stem,
-                        name=path.stem,
-                        path=str(path),
-                        format=path.suffix.lstrip("."),
-                    )
+        seen: set[str] = set()
+        for path in self._book_files():
+            book_id = path.stem
+            if book_id in seen:
+                logger.warning(
+                    "Ignoring opening book %s%s: id %s is already taken",
+                    book_id,
+                    path.suffix,
+                    book_id,
                 )
+                continue
+            seen.add(book_id)
+            books.append(
+                OpeningBook(
+                    id=book_id,
+                    name=self._read_display_name(book_id) or book_id,
+                    path=str(path),
+                    format=path.suffix.lstrip("."),
+                )
+            )
         return books
 
     def save_book(self, name: str, content: bytes, format: str) -> OpeningBook:
-        """Persist an opening book file."""
+        """Persist an opening book file and its display name.
+
+        Raises:
+            ValueError: If *format* is not a supported book extension.
+        """
+        if f".{format}" not in self._SUPPORTED_EXTENSIONS:
+            raise ValueError(f"Unsupported opening book format: {format!r}")
+
         self._books_dir.mkdir(parents=True, exist_ok=True)
 
         book_id = str(uuid.uuid4())
         dest = self._books_dir / f"{book_id}.{format}"
+        # Sidecar first: a save that fails half way leaves an orphan sidecar,
+        # which neither reader can see, rather than an orphan book file, which
+        # would list under its UUID — the very symptom this sidecar fixes.
+        _atomic_write(self._metadata_path(book_id), json.dumps({"name": name}))
         dest.write_bytes(content)
 
         logger.debug("Saved opening book %s to %s", book_id, dest)
@@ -497,9 +529,54 @@ class FileOpeningBookRepository(OpeningBookRepository):
 
     def get_book_path(self, book_id: str) -> Path | None:
         """Retrieve the filesystem path for a book by its ID."""
+        return next((path for path in self._book_files() if path.stem == book_id), None)
+
+    def _book_files(self) -> list[Path]:
+        """The book files, filtered and ordered.
+
+        Both readers derive from this, so the file :meth:`get_book_path`
+        resolves for an id is by construction the one :meth:`list_books`
+        reported under it. Sorting matters because directory order is
+        arbitrary and a stem can be ambiguous; filtering by extension keeps
+        sidecars, ``_atomic_write`` temp files, and anything else in the
+        directory from being mistaken for a book.
+        """
         if not self._books_dir.is_dir():
+            return []
+        return [
+            path
+            for path in sorted(self._books_dir.iterdir())
+            if path.is_file() and path.suffix in self._SUPPORTED_EXTENSIONS
+        ]
+
+    def _metadata_path(self, book_id: str) -> Path:
+        """Path of the sidecar holding *book_id*'s display name."""
+        return self._books_dir / f"{book_id}{self._METADATA_SUFFIX}"
+
+    def _read_display_name(self, book_id: str) -> str | None:
+        """Read a book's stored display name.
+
+        Returns ``None`` — leaving the caller to fall back to the book id —
+        when the sidecar is missing, unreadable, not JSON, or carries no
+        usable ``name``. Books written before sidecars existed have no
+        sidecar, and a half-written one must not take the whole listing down.
+
+        An absent sidecar is the ordinary legacy case and is silent. One that
+        exists but cannot be used is logged: the visible symptom is a book
+        reverting to its UUID name, which is exactly the bug the sidecar was
+        introduced to fix, so it should not be diagnosed by guesswork.
+        """
+        path = self._metadata_path(book_id)
+        if not path.is_file():
             return None
-        for path in self._books_dir.iterdir():
-            if path.is_file() and path.stem == book_id:
-                return path
+        try:
+            data: Any = _read_json(path)
+            if isinstance(data, dict):
+                name: Any = cast("dict[str, Any]", data).get("name")
+                if isinstance(name, str):
+                    return name
+        except (OSError, ValueError):
+            logger.warning("Unreadable opening book sidecar for %s", book_id, exc_info=True)
+            return None
+        logger.warning("Opening book sidecar for %s has no usable name", book_id)
         return None
