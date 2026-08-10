@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import concurrent.futures
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 import pytest
+from shared.storage import file_store
 from shared.storage.file_store import (
     FileGameRepository,
     FileOpeningBookRepository,
@@ -559,12 +561,127 @@ class TestFileOpeningBookRepository:
         saved = (tmp_path / "openings" / f"{book.id}.pgn").read_bytes()
         assert saved == content
 
+    def test_save_book_rejects_unsupported_format(self, tmp_path: Path) -> None:
+        """``meta.json`` is reserved: it would collide with the sidecar path.
+
+        The route validates extensions, but ``save_book`` is a public ABC
+        method and ``format="meta.json"`` would make the book file and its
+        own sidecar the same path, overwriting the content with metadata.
+        """
+        repo = FileOpeningBookRepository(tmp_path)
+        with pytest.raises(ValueError, match="Unsupported opening book format"):
+            repo.save_book("sneaky", b"data", "meta.json")
+
+    def test_failed_sidecar_write_leaves_no_listable_book(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A half-completed save must not leave a book listed under its UUID.
+
+        Saving is two writes, so it has a partial-success state. Writing the
+        sidecar first makes the leftover an orphan sidecar, which neither
+        reader can see.
+        """
+
+        def failing_write(path: Path, content: str) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(file_store, "_atomic_write", failing_write)
+
+        repo = FileOpeningBookRepository(tmp_path)
+        with pytest.raises(OSError):
+            repo.save_book("my_openings.pgn", b"1. e4 e5 *", "pgn")
+
+        assert repo.list_books() == []
+
+    def test_save_book_persists_display_name(self, tmp_path: Path) -> None:
+        """The uploaded filename survives the round trip through storage.
+
+        Books are stored under a generated UUID, so without a sidecar
+        ``list_books`` can only report the UUID as the name.
+        """
+        repo = FileOpeningBookRepository(tmp_path)
+        repo.save_book("my_openings.pgn", b"1. e4 e5 *", "pgn")
+
+        books = repo.list_books()
+        assert len(books) == 1
+        assert books[0].name == "my_openings.pgn"
+
+    def test_saved_book_id_is_not_the_display_name(self, tmp_path: Path) -> None:
+        """``id`` stays the opaque UUID even once ``name`` is restored."""
+        repo = FileOpeningBookRepository(tmp_path)
+        saved = repo.save_book("my_openings.pgn", b"1. e4 e5 *", "pgn")
+
+        listed = repo.list_books()[0]
+        assert listed.id == saved.id
+        assert listed.id != listed.name
+
+    def test_list_books_falls_back_to_stem_without_sidecar(self, tmp_path: Path) -> None:
+        """Books written before sidecars existed still list."""
+        books_dir = tmp_path / "openings"
+        books_dir.mkdir()
+        (books_dir / "legacy.pgn").write_text("1. e4 e5 *")
+
+        repo = FileOpeningBookRepository(tmp_path)
+        books = repo.list_books()
+        assert len(books) == 1
+        assert books[0].name == "legacy"
+
+    def test_list_books_falls_back_to_stem_on_unreadable_sidecar(self, tmp_path: Path) -> None:
+        """A corrupt sidecar degrades to the stem rather than raising."""
+        repo = FileOpeningBookRepository(tmp_path)
+        saved = repo.save_book("my_openings.pgn", b"1. e4 e5 *", "pgn")
+        (tmp_path / "openings" / f"{saved.id}.meta.json").write_text("{not json")
+
+        books = repo.list_books()
+        assert len(books) == 1
+        assert books[0].name == saved.id
+
+    def test_list_books_falls_back_to_stem_on_non_dict_sidecar(self, tmp_path: Path) -> None:
+        """Valid JSON that is not an object still degrades to the stem."""
+        repo = FileOpeningBookRepository(tmp_path)
+        saved = repo.save_book("my_openings.pgn", b"1. e4 e5 *", "pgn")
+        (tmp_path / "openings" / f"{saved.id}.meta.json").write_text('["my_openings.pgn"]')
+
+        books = repo.list_books()
+        assert len(books) == 1
+        assert books[0].name == saved.id
+
+    def test_list_books_falls_back_to_stem_on_non_string_name(self, tmp_path: Path) -> None:
+        """A non-string ``name`` must not reach ``OpeningBook.name``."""
+        repo = FileOpeningBookRepository(tmp_path)
+        saved = repo.save_book("my_openings.pgn", b"1. e4 e5 *", "pgn")
+        (tmp_path / "openings" / f"{saved.id}.meta.json").write_text('{"name": 42}')
+
+        books = repo.list_books()
+        assert len(books) == 1
+        assert books[0].name == saved.id
+
+    def test_list_books_falls_back_to_stem_on_sidecar_without_name(self, tmp_path: Path) -> None:
+        """A well-formed sidecar missing ``name`` degrades to the stem."""
+        repo = FileOpeningBookRepository(tmp_path)
+        saved = repo.save_book("my_openings.pgn", b"1. e4 e5 *", "pgn")
+        (tmp_path / "openings" / f"{saved.id}.meta.json").write_text('{"format": "pgn"}')
+
+        books = repo.list_books()
+        assert len(books) == 1
+        assert books[0].name == saved.id
+
+    def test_list_books_does_not_list_sidecars(self, tmp_path: Path) -> None:
+        """The sidecar is metadata, not a book."""
+        repo = FileOpeningBookRepository(tmp_path)
+        repo.save_book("my_openings.pgn", b"1. e4 e5 *", "pgn")
+
+        books = repo.list_books()
+        assert len(books) == 1
+        assert books[0].format == "pgn"
+
     def test_get_book_path_found(self, tmp_path: Path) -> None:
         repo = FileOpeningBookRepository(tmp_path)
         book = repo.save_book("test.pgn", b"data", "pgn")
         path = repo.get_book_path(book.id)
         assert path is not None
         assert path.is_file()
+        assert path.suffix == ".pgn"
 
     def test_get_book_path_not_found(self, tmp_path: Path) -> None:
         repo = FileOpeningBookRepository(tmp_path)
@@ -573,6 +690,62 @@ class TestFileOpeningBookRepository:
     def test_get_book_path_no_dir(self, tmp_path: Path) -> None:
         repo = FileOpeningBookRepository(tmp_path / "nonexistent")
         assert repo.get_book_path("anything") is None
+
+    def test_get_book_path_ignores_unsupported_extensions(self, tmp_path: Path) -> None:
+        """Unlike ``list_books``, this used to resolve any file in the directory.
+
+        An id that ``list_books`` will never show must not resolve here
+        either, or the two disagree about what a book is.
+        """
+        books_dir = tmp_path / "openings"
+        books_dir.mkdir()
+        (books_dir / "notes.txt").write_text("not a book")
+
+        repo = FileOpeningBookRepository(tmp_path)
+        assert repo.get_book_path("notes") is None
+
+    def test_get_book_path_ignores_sidecars(self, tmp_path: Path) -> None:
+        books_dir = tmp_path / "openings"
+        books_dir.mkdir()
+        (books_dir / "orphan.meta.json").write_text('{"name": "gone.pgn"}')
+
+        repo = FileOpeningBookRepository(tmp_path)
+        assert repo.get_book_path("orphan.meta") is None
+
+    def test_colliding_stems_list_once_and_stay_resolvable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two supported extensions can share a stem, so an id is ambiguous.
+
+        The invariant that matters is that everything listed can be fetched
+        back by its own id — a listed book that ``get_book_path`` will not
+        resolve is a dead dropdown entry, and duplicate ids also collide as
+        React keys.
+
+        ``Path.iterdir`` order is arbitrary and on this filesystem happens
+        to be sorted already, so the order is forced here; otherwise this
+        would pass without the sort and prove nothing.
+        """
+        books_dir = tmp_path / "openings"
+        books_dir.mkdir()
+        (books_dir / "dup.pgn").write_text("1. e4 e5 *")
+        (books_dir / "dup.epd").write_text("fen_data")
+
+        real_iterdir = Path.iterdir
+
+        def descending_iterdir(self: Path) -> Iterator[Path]:
+            return iter(sorted(real_iterdir(self), reverse=True))
+
+        monkeypatch.setattr(Path, "iterdir", descending_iterdir)
+
+        repo = FileOpeningBookRepository(tmp_path)
+        books = repo.list_books()
+
+        assert len(books) == 1
+        assert len({b.id for b in books}) == len(books)
+        assert Path(books[0].path) == books_dir / "dup.epd"
+        for book in books:
+            assert repo.get_book_path(book.id) == Path(book.path)
 
     def test_round_trip_save_and_list(self, tmp_path: Path) -> None:
         repo = FileOpeningBookRepository(tmp_path)
@@ -583,3 +756,15 @@ class TestFileOpeningBookRepository:
         assert len(books) == 2
         formats = {b.format for b in books}
         assert formats == {"pgn", "epd"}
+        names = {b.name for b in books}
+        assert names == {"openings.pgn", "positions.epd"}
+
+    def test_round_trip_save_list_and_resolve(self, tmp_path: Path) -> None:
+        """The id from ``list_books`` resolves back to the saved content."""
+        repo = FileOpeningBookRepository(tmp_path)
+        repo.save_book("openings.pgn", b"1. d4 d5 *", "pgn")
+
+        listed = repo.list_books()[0]
+        path = repo.get_book_path(listed.id)
+        assert path is not None
+        assert path.read_bytes() == b"1. d4 d5 *"
