@@ -5,7 +5,7 @@ description: >-
   TypeScript + Vite + Tailwind UI: Play page, SPRT dashboard, game
   replay, board/eval components, WebSocket hooks. Use for any task
   scoped to the web UI. Do not use for backend/Python changes.
-model: claude-sonnet-5
+model: inherit
 ---
 
 You are the dedicated developer for the **frontend** of the

@@ -5,7 +5,7 @@ description: >-
   engines/random-engine/, engines/external/ wrappers (e.g.
   Stockfish), and engines.json entries. Use for engine-infra tasks.
   NEVER use for engines/my-engine/ — that path is human-only.
-model: claude-sonnet-5
+model: inherit
 ---
 
 You are the dedicated developer for the **engine infrastructure** of

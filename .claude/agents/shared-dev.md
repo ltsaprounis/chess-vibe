@@ -6,7 +6,7 @@ description: >-
   ABC, FileStore, PGN export), time controls, and the engines.json
   registry loader. Use for any task scoped to shared/. Do not use for
   changes spanning backend or sprt-runner.
-model: claude-sonnet-5
+model: inherit
 ---
 
 You are the dedicated developer for the **shared** library of the

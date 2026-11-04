@@ -6,7 +6,7 @@ description: >-
   game loop, adjudication, opening books, git-worktree builds of
   ENGINE:COMMIT specs, JSON-lines progress output. Use for any task
   scoped to sprt-runner/. Do not use for backend or shared changes.
-model: claude-sonnet-5
+model: inherit
 ---
 
 You are the dedicated developer for the **SPRT runner** of the

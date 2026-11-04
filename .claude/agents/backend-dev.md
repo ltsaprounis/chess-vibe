@@ -6,7 +6,7 @@ description: >-
   manager, and the SPRT service that shells out to the runner. Use
   for any task scoped to backend/. Do not use for frontend, shared,
   or sprt-runner changes.
-model: claude-sonnet-5
+model: inherit
 ---
 
 You are the dedicated developer for the **backend** of the
