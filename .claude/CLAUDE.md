@@ -43,9 +43,10 @@ reason — fastapi's own range is loose).
 
 ## Component sub-agents
 
-`.claude/agents/` defines one sub-agent per component, all pinned to
-Sonnet 5 (`claude-sonnet-5`). Each knows its component's scope,
-boundary rules, and verification gates:
+`.claude/agents/` defines one sub-agent per component, all set to
+`model: inherit` so they run on the same model as the invoking
+session. Each knows its component's scope, boundary rules, and
+verification gates:
 
 | Agent           | Owns                                                                           |
 |-----------------|--------------------------------------------------------------------------------|
@@ -56,7 +57,7 @@ boundary rules, and verification gates:
 | engines-dev     | `engines/random-engine/`, `engines/external/`, `engines.json` — never my-engine |
 
 One cross-cutting agent sits apart from the table:
-`boundary-reviewer` (model: inherit, read-only) reviews a diff
+`boundary-reviewer` (read-only) reviews a diff
 against architecture.md, copilot-instructions.md, and the hard rules
 below — ownership, boundaries, typing, tests, dependency policy.
 Run it before committing, especially after component agents worked
