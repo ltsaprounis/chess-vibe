@@ -13,9 +13,14 @@ from unittest.mock import MagicMock
 
 import pytest
 from shared.storage.models import GameResult, Move
-from shared.time_control import DepthTimeControl, FixedTimeControl, parse_time_control
+from shared.time_control import (
+    DepthTimeControl,
+    FixedTimeControl,
+    IncrementTimeControl,
+    parse_time_control,
+)
 from sprt_runner.adjudication import AdjudicationConfig
-from sprt_runner.game import GameConfig
+from sprt_runner.game import DEFAULT_MOVE_TIMEOUT_MS, DEFAULT_TIME_MARGIN_MS, GameConfig
 from sprt_runner.openings import OpeningPair
 from sprt_runner.runner import (
     RunConfig,
@@ -730,6 +735,62 @@ class TestGamePersistence:
 
         # No data directory should be created
         assert not (tmp_path / "games").exists()
+
+    @pytest.mark.asyncio
+    async def test_sidecar_records_both_clocks_of_every_move(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Clock values reach the .eval.json unchanged, each under its own colour."""
+        _FakeProcessWithMoves.captured_tasks = []
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _FakeProcessWithMoves)
+        monkeypatch.setattr(
+            _FakeProcessWithMoves,
+            "_test_moves",
+            [
+                Move(
+                    uci="e2e4",
+                    san="e4",
+                    fen_after="fen 1",
+                    clock_white_ms=59_500,
+                    clock_black_ms=60_000,
+                ),
+                Move(
+                    uci="e7e5",
+                    san="e5",
+                    fen_after="fen 2",
+                    clock_white_ms=59_500,
+                    clock_black_ms=59_250,
+                ),
+            ],
+        )
+
+        games_dir = tmp_path / "games"
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=IncrementTimeControl(wtime_ms=60_000, btime_ms=60_000),
+            elo0=0.0,
+            elo1=500.0,
+            book_path=None,
+            output_dir=games_dir,
+        )
+
+        await run_sprt(config)
+
+        sidecars = list(games_dir.glob("*.eval.json"))
+        assert len(sidecars) >= 1
+        for sidecar in sidecars:
+            moves = json.loads(sidecar.read_text())["moves"]
+            assert [(move["clock_white_ms"], move["clock_black_ms"]) for move in moves] == [
+                (59_500, 60_000),
+                (59_500, 59_250),
+            ]
 
 
 class _SlowFakeProcess:
@@ -1461,6 +1522,138 @@ class TestSyzygyPathValidationCLI:
         assert exc_info.value.code != 0
         message = json.loads(capsys.readouterr().out.strip())
         assert message["type"] == "error"
+
+
+_RUN_ARGV = ["run", "--base", "eng1", "--test", "eng2", "--tc", "depth=1"]
+
+
+class TestTimeLimitFlagsCLI:
+    """Parser-level tests for --time-margin-ms and --move-timeout-ms."""
+
+    def test_defaults(self) -> None:
+        args = build_parser().parse_args(_RUN_ARGV)
+        assert args.time_margin_ms == DEFAULT_TIME_MARGIN_MS == 100
+        assert args.move_timeout_ms == DEFAULT_MOVE_TIMEOUT_MS == 30_000
+
+    def test_explicit_values(self) -> None:
+        args = build_parser().parse_args(
+            [*_RUN_ARGV, "--time-margin-ms", "250", "--move-timeout-ms", "45000"]
+        )
+        assert args.time_margin_ms == 250
+        assert args.move_timeout_ms == 45_000
+
+
+class TestMainTimeLimitWiring:
+    """main()-level tests proving the flags reach RunConfig.
+
+    Parser tests cannot see a kwarg dropped from main()'s RunConfig(...) call,
+    so these patch run_sprt and inspect the config it is handed.
+    """
+
+    @staticmethod
+    def _run_main(monkeypatch: pytest.MonkeyPatch, *extra_args: str) -> RunConfig:
+        """Run main() with the given extra flags and return the resulting RunConfig."""
+        captured: dict[str, RunConfig] = {}
+
+        async def _fake_run_sprt(config: RunConfig) -> None:
+            captured["config"] = config
+
+        monkeypatch.setattr("sprt_runner.runner.run_sprt", _fake_run_sprt)
+        monkeypatch.setattr("sys.argv", ["sprt_runner", *_RUN_ARGV, *extra_args])
+
+        main()
+
+        return captured["config"]
+
+    def test_flags_reach_run_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._run_main(
+            monkeypatch, "--time-margin-ms", "250", "--move-timeout-ms", "45000"
+        )
+        assert config.time_margin_ms == 250
+        assert config.move_timeout_ms == 45_000
+
+    def test_margin_of_zero_is_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._run_main(monkeypatch, "--time-margin-ms", "0")
+        assert config.time_margin_ms == 0
+
+    def test_smallest_move_timeout_is_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._run_main(monkeypatch, "--move-timeout-ms", "1")
+        assert config.move_timeout_ms == 1
+
+
+class TestTimeLimitValidationCLI:
+    """Invalid limits fail before any game runs, on the --tc error channel."""
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--time-margin-ms", "-1"),
+            ("--move-timeout-ms", "0"),
+            ("--move-timeout-ms", "-1"),
+        ],
+        ids=["negative_margin", "zero_timeout", "negative_timeout"],
+    )
+    def test_invalid_limit_exits_nonzero_with_stdout_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        flag: str,
+        value: str,
+    ) -> None:
+        async def _fail_if_called(config: RunConfig) -> None:
+            raise AssertionError("run_sprt must not be reached when validation fails")
+
+        monkeypatch.setattr("sprt_runner.runner.run_sprt", _fail_if_called)
+        monkeypatch.setattr("sys.argv", ["sprt_runner", *_RUN_ARGV, flag, value])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code != 0
+        message = json.loads(capsys.readouterr().out.strip())
+        assert message["type"] == "error"
+        assert flag in message["message"]
+
+
+class TestRunSprtTimeLimitWiring:
+    """The limits on RunConfig reach the GameConfig each worker plays with."""
+
+    @staticmethod
+    async def _captured_game_configs(
+        monkeypatch: pytest.MonkeyPatch, config: RunConfig
+    ) -> list[GameConfig]:
+        """Run the SPRT loop against fake workers and return their game configs."""
+        _FakeProcess.captured_tasks = []
+
+        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _FakeProcess)
+
+        await run_sprt(config)
+
+        return [task.game_config for task in _FakeProcess.captured_tasks]
+
+    @pytest.mark.asyncio
+    async def test_limits_reach_every_game_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        game_configs = await self._captured_game_configs(
+            monkeypatch,
+            RunConfig(
+                base="base-engine",
+                test="test-engine",
+                time_control=FixedTimeControl(movetime_ms=100),
+                elo0=0.0,
+                elo1=500.0,
+                time_margin_ms=250,
+                move_timeout_ms=45_000,
+            ),
+        )
+
+        assert len(game_configs) >= 2
+        assert {config.time_margin_ms for config in game_configs} == {250}
+        assert {config.move_timeout_ms for config in game_configs} == {45_000}
 
 
 class TestWorktreeCleanupAfterSprt:
