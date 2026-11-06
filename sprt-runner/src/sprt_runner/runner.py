@@ -40,7 +40,12 @@ from shared.time_control import (
 from shared.uci_client import UCIClient
 
 from sprt_runner.adjudication import AdjudicationConfig, validate_syzygy_path
-from sprt_runner.game import GameConfig, play_game
+from sprt_runner.game import (
+    DEFAULT_MOVE_TIMEOUT_MS,
+    DEFAULT_TIME_MARGIN_MS,
+    GameConfig,
+    play_game,
+)
 from sprt_runner.openings import OpeningPair, load_openings, make_opening_pairs
 from sprt_runner.sprt import SPRTDecision, sprt_test
 from sprt_runner.worktree import (
@@ -80,6 +85,12 @@ class RunConfig:
         adjudication: Adjudication configuration.
         repo_root: Root of the git repository.
         keep_worktrees: If True, preserve worktrees after test completes.
+        output_dir: Directory to write game files into, or None to not save them.
+        test_id: SPRT test ID stamped into each game record, or None.
+        time_margin_ms: Grace on clock and movetime searches, in milliseconds.
+            See :class:`~sprt_runner.game.GameConfig`.
+        move_timeout_ms: Limit on depth and nodes searches, in milliseconds.
+            See :class:`~sprt_runner.game.GameConfig`.
     """
 
     base: str
@@ -96,6 +107,8 @@ class RunConfig:
     keep_worktrees: bool = False
     output_dir: Path | None = None
     test_id: str | None = None
+    time_margin_ms: int = DEFAULT_TIME_MARGIN_MS
+    move_timeout_ms: int = DEFAULT_MOVE_TIMEOUT_MS
 
 
 # ---------------------------------------------------------------------------
@@ -655,6 +668,8 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                     time_control=config.time_control,
                     adjudication=config.adjudication,
                     start_fen=start_fen,
+                    time_margin_ms=config.time_margin_ms,
+                    move_timeout_ms=config.move_timeout_ms,
                 )
 
                 task = WorkerTask(
@@ -947,6 +962,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="SPRT test ID stamped into each game record for filtering",
     )
+    run_parser.add_argument(
+        "--time-margin-ms",
+        type=int,
+        default=DEFAULT_TIME_MARGIN_MS,
+        help="Grace added to the limit of clock and movetime searches (ms)",
+    )
+    run_parser.add_argument(
+        "--move-timeout-ms",
+        type=int,
+        default=DEFAULT_MOVE_TIMEOUT_MS,
+        help="Limit on depth and nodes searches (ms)",
+    )
 
     return parser
 
@@ -971,6 +998,16 @@ def main() -> None:
         tc = parse_time_control(args.tc)
     except ValueError as e:
         print(format_error_message(str(e)), flush=True)
+        sys.exit(1)
+
+    if args.time_margin_ms < 0:
+        message = f"--time-margin-ms must not be negative, got {args.time_margin_ms}"
+        print(format_error_message(message), flush=True)
+        sys.exit(1)
+
+    if args.move_timeout_ms <= 0:
+        message = f"--move-timeout-ms must be positive, got {args.move_timeout_ms}"
+        print(format_error_message(message), flush=True)
         sys.exit(1)
 
     # Unlike --book/--output-dir, an explicitly-supplied path is validated
@@ -1004,6 +1041,8 @@ def main() -> None:
         keep_worktrees=args.keep_worktrees,
         output_dir=Path(args.output_dir) if args.output_dir else None,
         test_id=args.test_id,
+        time_margin_ms=args.time_margin_ms,
+        move_timeout_ms=args.move_timeout_ms,
     )
 
     try:

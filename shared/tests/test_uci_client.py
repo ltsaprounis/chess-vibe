@@ -416,6 +416,49 @@ class TestUCIClientErrorHandling:
                 await client.uci(timeout=0.01)
 
     @pytest.mark.asyncio
+    async def test_go_times_out_at_explicit_limit_when_engine_is_silent(self) -> None:
+        """A silent engine loses at the explicit limit, not at ``default_timeout``.
+
+        The SPRT clock relies on this deadline to end a search that never answers.
+        """
+        client = UCIClient("/fake/engine", default_timeout=30.0)
+        mock_proc = _make_mock_process([])
+
+        async def never_answers() -> bytes:
+            await asyncio.Event().wait()
+            return b""
+
+        mock_proc.stdout.readline = AsyncMock(side_effect=never_answers)
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_proc
+            await client.start()
+            with pytest.raises(UCITimeoutError):
+                await asyncio.wait_for(
+                    client.go(FixedTimeControl(movetime_ms=1), timeout=0.05), timeout=2.0
+                )
+
+    @pytest.mark.asyncio
+    async def test_go_deadline_is_not_reset_by_info_lines(self) -> None:
+        """An engine that keeps printing ``info`` still loses at the limit."""
+        client = UCIClient("/fake/engine", default_timeout=30.0)
+        mock_proc = _make_mock_process([])
+
+        async def keeps_printing() -> bytes:
+            await asyncio.sleep(0.01)
+            return b"info depth 1\n"
+
+        mock_proc.stdout.readline = AsyncMock(side_effect=keeps_printing)
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = mock_proc
+            await client.start()
+            with pytest.raises(UCITimeoutError):
+                await asyncio.wait_for(
+                    client.go(FixedTimeControl(movetime_ms=1), timeout=0.05), timeout=2.0
+                )
+
+    @pytest.mark.asyncio
     async def test_engine_crash_detected(self) -> None:
         client = UCIClient("/fake/engine")
         mock_proc = _make_mock_process([])
