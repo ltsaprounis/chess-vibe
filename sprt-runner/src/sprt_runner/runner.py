@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import json
 import logging
 import multiprocessing
@@ -57,10 +58,12 @@ from sprt_runner.worktree import (
 
 logger = logging.getLogger(__name__)
 
-# Default timeout (seconds) for ``result_queue.get()`` in the SPRT loop.
-# Extracted as a module-level constant so tests can monkeypatch it to a
-# small value without waiting 5 minutes for a dead-worker timeout.
-_QUEUE_TIMEOUT_SECONDS: float = 300
+# How long (seconds) one ``result_queue.get()`` in the SPRT loop waits before
+# the coordinator checks for dead workers and waits again. It bounds how long
+# a dead worker goes unnoticed, and how long the process lingers after
+# SIGTERM or SIGINT, since ``asyncio.run`` waits for that blocked get (#198).
+# Results are read as soon as they arrive, whatever this is set to.
+_QUEUE_TIMEOUT_SECONDS: float = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -469,28 +472,51 @@ def worker_entry(
 
 
 def _cleanup_workers(
-    active_workers: list[multiprocessing.Process],
+    workers: list[multiprocessing.Process],
 ) -> list[multiprocessing.Process]:
-    """Join finished workers and return only those still alive.
+    """Drop workers that have exited and return the ones that haven't.
 
-    Calls ``join(timeout=1)`` on every worker *before* checking
-    ``is_alive()``.  This closes the race window where a worker has
-    already put its result on the queue but hasn't fully exited yet
-    — ``join`` gives it a brief moment to finish, so ``is_alive()``
-    returns ``False`` and the slot is freed for a new worker.
+    Dropping them releases their ``Process`` objects, and with them the file
+    descriptors each one keeps open. ``join()`` is called only once a worker
+    has exited, so it returns at once. Joining live workers with a timeout
+    after every result cost about a second per worker per result (#187).
 
     Args:
-        active_workers: List of currently tracked worker processes.
+        workers: Worker processes whose games have finished.
 
     Returns:
-        A new list containing only the workers that are still alive.
+        A new list containing only the workers that haven't exited yet.
     """
     still_alive: list[multiprocessing.Process] = []
-    for w in active_workers:
-        w.join(timeout=1)
+    for w in workers:
         if w.is_alive():
             still_alive.append(w)
+        else:
+            w.join()
     return still_alive
+
+
+def _drain_results(
+    result_queue: multiprocessing.Queue[WorkerResult],
+) -> list[WorkerResult]:
+    """Read every result already waiting on the queue, without waiting for more.
+
+    A result whose bytes are still being written is read to its end. Call
+    this only while nothing else is reading the queue: a reader blocked in
+    ``get`` holds the queue's read lock, and this would then find nothing.
+
+    Args:
+        result_queue: Queue the workers put their results on.
+
+    Returns:
+        The results that were waiting, in queue order.
+    """
+    drained: list[WorkerResult] = []
+    while True:
+        try:
+            drained.append(result_queue.get_nowait())
+        except queue.Empty:
+            return drained
 
 
 def _terminate_all_workers(active_workers: list[multiprocessing.Process]) -> None:
@@ -632,14 +658,21 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
     # Result queue for IPC from worker processes
     result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
 
-    active_workers: list[multiprocessing.Process] = []
-    # Map worker PID → game_id so dead workers can be identified.
-    worker_game_ids: dict[int, str] = {}
+    # A game holds a slot from launch until its result is read. Its process
+    # then moves to ``finished`` until it has exited and can be reaped. It may
+    # still be shutting down when its result arrives, so freeing slots only on
+    # process exit, or waiting for the exit, stalls the run (#187).
+    running: dict[str, multiprocessing.Process] = {}
+    finished: list[multiprocessing.Process] = []
+    # Results read while checking for dead workers, handled before waiting again.
+    pending: collections.deque[WorkerResult] = collections.deque()
+    # Deaths since the last delivered result. A full round of them is fatal.
+    consecutive_deaths = 0
 
     try:
         while True:
             # Launch workers up to concurrency limit
-            while len(active_workers) < config.concurrency:
+            while len(running) < config.concurrency:
                 # Select opening
                 start_fen: str | None = None
                 swap_colors = False
@@ -685,77 +718,85 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                     args=(task, result_queue),
                 )
                 worker.start()
-                active_workers.append(worker)
-                pid = worker.pid
-                if pid is None:
-                    raise RuntimeError("Worker process PID is None after start()")
-                worker_game_ids[pid] = game_id
+                running[game_id] = worker
 
-            # Wait for a result from any worker (with timeout for crash safety).
-            # Offload the blocking queue.get() to a thread so the asyncio event
-            # loop stays responsive (allows cancellation, status updates, etc.).
-            loop = asyncio.get_running_loop()
-            try:
-                worker_result = await loop.run_in_executor(
-                    None, lambda: result_queue.get(timeout=_QUEUE_TIMEOUT_SECONDS)
-                )
-            except queue.Empty:
-                # Queue timeout — check for dead workers
-                dead = [w for w in active_workers if not w.is_alive()]
-                for w in dead:
-                    wpid = w.pid
-                    if wpid is not None:
-                        dead_game_id = worker_game_ids.pop(wpid, "unknown")
-                    else:
-                        dead_game_id = "unknown"
+            worker_result: WorkerResult | None
+            if pending:
+                worker_result = pending.popleft()
+            else:
+                # Offload the blocking queue.get() to a thread so the asyncio
+                # event loop stays responsive (allows cancellation). The short
+                # timeout bounds how long that thread outlives a cancellation.
+                loop = asyncio.get_running_loop()
+                try:
+                    worker_result = await loop.run_in_executor(
+                        None, lambda: result_queue.get(timeout=_QUEUE_TIMEOUT_SECONDS)
+                    )
+                except queue.Empty:
+                    worker_result = None
+                except Exception:
+                    logger.exception("Unexpected error while reading from result queue")
+                    print(
+                        format_error_message("Fatal error reading result queue; aborting"),
+                        flush=True,
+                    )
+                    break
+
+            if worker_result is not None:
+                delivered_by = running.pop(worker_result.game_id, None)
+                if delivered_by is not None:
+                    finished.append(delivered_by)
+                consecutive_deaths = 0
+            finished = _cleanup_workers(finished)
+
+            # A worker that exits without delivering a result has died. A
+            # worker flushes its result into the pipe before it can exit (the
+            # queue's feeder thread is joined at exit, as long as
+            # ``worker_entry`` never calls ``cancel_join_thread`` or
+            # ``os._exit``), so read what is waiting before declaring any of
+            # them dead. No ``get`` is outstanding here, so nothing else holds
+            # the queue's read lock.
+            exited = [gid for gid, w in running.items() if not w.is_alive()]
+            if exited:
+                try:
+                    drained = _drain_results(result_queue)
+                except Exception:
+                    logger.exception("Unexpected error while reading from result queue")
+                    print(
+                        format_error_message("Fatal error reading result queue; aborting"),
+                        flush=True,
+                    )
+                    break
+                if drained:
+                    consecutive_deaths = 0
+                pending.extend(drained)
+                delivered = {r.game_id for r in pending}
+                dead = [gid for gid in exited if gid not in delivered]
+                for dead_game_id in dead:
+                    dead_worker = running.pop(dead_game_id)
                     print(
                         format_error_message(
-                            f"Worker for game {dead_game_id} died unexpectedly (pid={wpid})"
+                            f"Worker for game {dead_game_id} died unexpectedly "
+                            f"(pid={dead_worker.pid})"
                         ),
                         flush=True,
                     )
                     errors += 1
-                    w.join(timeout=1)
-                active_workers = [w for w in active_workers if w.is_alive()]
-                if not active_workers:
-                    print(format_error_message("All workers died unexpectedly"), flush=True)
-                    break
-                continue
-            except Exception:
-                logger.exception("Unexpected error while reading from result queue")
-                print(
-                    format_error_message("Fatal error reading result queue; aborting"),
-                    flush=True,
-                )
-                break
-
-            # Clean up finished workers (join to free resources)
-            active_workers = _cleanup_workers(active_workers)
-
-            # The worker that produced this result has done its job — remove
-            # its entry from the mapping so it is not flagged as a dead worker.
-            pid_to_remove: int | None = None
-            for pid, gid in worker_game_ids.items():
-                if gid == worker_result.game_id:
-                    pid_to_remove = pid
-                    break
-            if pid_to_remove is not None:
-                del worker_game_ids[pid_to_remove]
-
-            # Detect workers that have exited and no longer appear in active_workers.
-            # We cannot safely distinguish here between normal and abnormal exits,
-            # and results may still be waiting in the queue, so we only clean up the
-            # bookkeeping and log a warning instead of treating this as a hard error.
-            active_pids = {w.pid for w in active_workers}
-            for pid in list(worker_game_ids):
-                if pid not in active_pids:
-                    dead_game_id = worker_game_ids.pop(pid)
-                    logger.warning(
-                        "Worker process for game %s is no longer active (pid=%s); "
-                        "result may already be queued or the worker may have exited early.",
-                        dead_game_id,
-                        pid,
+                    consecutive_deaths += 1
+                    dead_worker.join()
+                if dead and consecutive_deaths >= config.concurrency:
+                    deaths = "death" if consecutive_deaths == 1 else "deaths"
+                    print(
+                        format_error_message(
+                            f"Aborting after {consecutive_deaths} worker {deaths} "
+                            "in a row with no result"
+                        ),
+                        flush=True,
                     )
+                    break
+
+            if worker_result is None:
+                continue
 
             # Handle result
             if worker_result.error is not None:
@@ -865,8 +906,9 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                     flush=True,
                 )
                 # Terminate remaining workers before breaking
-                _terminate_all_workers(active_workers)
-                active_workers.clear()
+                _terminate_all_workers([*running.values(), *finished])
+                running.clear()
+                finished.clear()
                 break
 
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -901,7 +943,7 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
     finally:
         # Terminate any workers still alive (no-op if already cleared at
         # normal SPRT convergence).
-        _terminate_all_workers(active_workers)
+        _terminate_all_workers([*running.values(), *finished])
 
 
 # ---------------------------------------------------------------------------
@@ -1007,6 +1049,12 @@ def main() -> None:
 
     if args.move_timeout_ms <= 0:
         message = f"--move-timeout-ms must be positive, got {args.move_timeout_ms}"
+        print(format_error_message(message), flush=True)
+        sys.exit(1)
+
+    # With no worker slot the coordinator would launch nothing and wait forever.
+    if args.concurrency < 1:
+        message = f"--concurrency must be at least 1, got {args.concurrency}"
         print(format_error_message(message), flush=True)
         sys.exit(1)
 

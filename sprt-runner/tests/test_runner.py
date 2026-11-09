@@ -7,6 +7,7 @@ import json
 import logging
 import multiprocessing
 import shlex
+import time
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock
@@ -27,6 +28,7 @@ from sprt_runner.runner import (
     WorkerResult,
     WorkerTask,
     _cleanup_workers,  # type: ignore[reportPrivateUsage]
+    _drain_results,  # type: ignore[reportPrivateUsage]
     _resolve_run_command,  # type: ignore[reportPrivateUsage]
     _terminate_all_workers,  # type: ignore[reportPrivateUsage]
     build_parser,
@@ -330,112 +332,54 @@ class TestWorkerEntry:
 
 
 class TestCleanupWorkers:
-    """Tests for the _cleanup_workers helper that joins finished workers."""
+    """Tests for _cleanup_workers, which reaps workers without ever waiting on one.
 
-    def test_worker_still_alive_after_join_stays_in_list(self) -> None:
-        """A genuinely alive worker stays in active_workers after cleanup."""
+    A worker that has delivered its result may still be shutting down, and
+    one still playing can take minutes. Joining either with a timeout made
+    the coordinator wait about a second per running worker after every
+    result (#187), so only workers that have already exited are joined.
+    """
+
+    def test_running_worker_is_kept_without_joining(self) -> None:
+        """A worker that hasn't exited is kept and never joined."""
         worker = MagicMock(spec=multiprocessing.Process)
         worker.is_alive.return_value = True
 
         result = _cleanup_workers([worker])
 
-        worker.join.assert_called_once_with(timeout=1)
+        worker.join.assert_not_called()
         assert result == [worker]
 
-    def test_worker_exits_after_join_is_removed(self) -> None:
-        """A worker that exits during join() is removed from active_workers."""
+    def test_exited_worker_is_joined_and_dropped(self) -> None:
+        """A worker that has exited is joined, which reaps it, and dropped."""
         worker = MagicMock(spec=multiprocessing.Process)
         worker.is_alive.return_value = False
 
         result = _cleanup_workers([worker])
 
-        worker.join.assert_called_once_with(timeout=1)
+        assert worker.join.call_count == 1
         assert result == []
 
-    def test_race_condition_worker_alive_then_exits(self) -> None:
-        """Simulates the race: worker is alive before join, exits during join.
+    def test_mixed_workers_keep_only_running_ones(self) -> None:
+        """Only exited workers are joined; running ones are kept in order."""
+        running_a = MagicMock(spec=multiprocessing.Process)
+        running_a.is_alive.return_value = True
+        exited = MagicMock(spec=multiprocessing.Process)
+        exited.is_alive.return_value = False
+        running_b = MagicMock(spec=multiprocessing.Process)
+        running_b.is_alive.return_value = True
 
-        Before the fix, is_alive() was checked *before* join(), so the worker
-        would stay in active_workers even though it had finished. The fix calls
-        join(timeout=1) first, giving the worker time to exit, then checks
-        is_alive().
-        """
-        worker = MagicMock(spec=multiprocessing.Process)
+        result = _cleanup_workers([running_a, exited, running_b])
 
-        # Simulate: join() causes the worker to finish, so is_alive() returns False
-        def side_effect(timeout: int = 0) -> None:
-            worker.is_alive.return_value = False
-
-        worker.join.side_effect = side_effect
-        worker.is_alive.return_value = True  # alive before join
-
-        result = _cleanup_workers([worker])
-
-        worker.join.assert_called_once_with(timeout=1)
-        worker.is_alive.assert_called()
-        assert result == []
-
-    def test_multiple_workers_mixed_states(self) -> None:
-        """With multiple workers, only genuinely alive ones remain."""
-        alive_worker = MagicMock(spec=multiprocessing.Process)
-        alive_worker.is_alive.return_value = True
-
-        dead_worker = MagicMock(spec=multiprocessing.Process)
-        dead_worker.is_alive.return_value = False
-
-        racing_worker = MagicMock(spec=multiprocessing.Process)
-
-        def race_side_effect(timeout: int = 0) -> None:
-            racing_worker.is_alive.return_value = False
-
-        racing_worker.join.side_effect = race_side_effect
-        racing_worker.is_alive.return_value = True
-
-        result = _cleanup_workers([alive_worker, dead_worker, racing_worker])
-
-        assert result == [alive_worker]
-        alive_worker.join.assert_called_once_with(timeout=1)
-        dead_worker.join.assert_called_once_with(timeout=1)
-        racing_worker.join.assert_called_once_with(timeout=1)
-
-    def test_no_zombie_processes_all_finished_joined(self) -> None:
-        """All finished workers have join() called to prevent zombies."""
-        workers: list[multiprocessing.Process] = []
-        for _ in range(3):
-            w = MagicMock(spec=multiprocessing.Process)
-            w.is_alive.return_value = False
-            workers.append(w)
-
-        result = _cleanup_workers(workers)
-
-        assert result == []
-        for w in workers:
-            w.join.assert_called_once_with(timeout=1)  # type: ignore[union-attr]
+        assert result == [running_a, running_b]
+        running_a.join.assert_not_called()
+        running_b.join.assert_not_called()
+        assert exited.join.call_count == 1
 
     def test_empty_worker_list(self) -> None:
         """Cleanup with no workers returns empty list."""
         result = _cleanup_workers([])
         assert result == []
-
-    def test_concurrency_one_sequential_cleanup(self) -> None:
-        """At concurrency=1, a single worker that finishes is cleaned up.
-
-        This is the core scenario: after result_queue.get() returns at
-        concurrency=1, the single worker must be cleaned up so a new
-        worker can be launched.
-        """
-        worker = MagicMock(spec=multiprocessing.Process)
-
-        def finish_on_join(timeout: int = 0) -> None:
-            worker.is_alive.return_value = False
-
-        worker.join.side_effect = finish_on_join
-        worker.is_alive.return_value = True
-
-        result = _cleanup_workers([worker])
-
-        assert result == []
-        worker.join.assert_called_once_with(timeout=1)
 
 
 # ---------------------------------------------------------------------------
@@ -859,7 +803,7 @@ class TestRunSprtNonBlocking:
 
         If the blocking ``result_queue.get()`` were called directly (without
         ``run_in_executor``), ``asyncio.CancelledError`` could not be delivered
-        until the 300-second timeout expired.  With the executor wrapper the
+        until the queue timeout expired.  With the executor wrapper the
         cancellation is delivered promptly.
         """
         _SlowFakeProcess.captured_tasks = []
@@ -985,7 +929,7 @@ class TestDeadWorkerErrorReporting:
         monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
         monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
         monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _DeadFakeProcess)
-        # Use a tiny timeout so the test doesn't wait 300 s
+        # Shorten the 0.5 s poll so the death is found quickly
         monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
 
         config = RunConfig(
@@ -997,14 +941,14 @@ class TestDeadWorkerErrorReporting:
             book_path=None,
         )
 
-        await run_sprt(config)
+        await _run_within(config, 5.0, monkeypatch)
 
         captured = capsys.readouterr().out
         lines = [line for line in captured.strip().split("\n") if line]
 
         # There should be at least two error messages:
         # 1) per-game error with game ID
-        # 2) "All workers died unexpectedly"
+        # 2) the fatal stop after a full round of deaths
         error_msgs = [json.loads(line) for line in lines if '"type": "error"' in line]
         assert len(error_msgs) >= 2
 
@@ -1018,27 +962,30 @@ class TestDeadWorkerErrorReporting:
         captured_game_id = _DeadFakeProcess.captured_tasks[0].game_id
         assert captured_game_id in per_game_error["message"]
 
-        # Last error should be the "all workers died" message
-        all_dead_error = error_msgs[-1]
-        assert "All workers died unexpectedly" in all_dead_error["message"]
+        # Last error should be the fatal stop
+        assert error_msgs[-1]["message"] == "Aborting after 1 worker death in a row with no result"
 
     @pytest.mark.asyncio
     async def test_dead_worker_errors_are_counted(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Dead-worker games are detected and logged.
+        """A worker that dies among successful games is reported and counted.
 
-        We combine a dead worker (first) with a healthy worker (second)
-        that delivers a normal result, triggering a progress message.
-        The dead worker should produce a warning log identifying its game.
+        The first and fourth workers die without a result; the rest finish
+        normally. Each death gets an ``error`` line naming its game and
+        raises ``errors`` in ``progress``. A death with successes on either
+        side of it isn't fatal, so the run still reaches a decision. The
+        queue timeout isn't shortened.
         """
 
-        class _FirstDeadThenAliveFakeProcess:
-            """First worker dies; subsequent workers succeed immediately."""
+        class _SomeDieFakeProcess:
+            """Workers 0 and 3 die without a result; the others deliver and linger."""
 
+            dying_calls: ClassVar[frozenset[int]] = frozenset({0, 3})
             captured_tasks: ClassVar[list[WorkerTask]] = []
+            instances: ClassVar[list[_SomeDieFakeProcess]] = []
             call_count: ClassVar[int] = 0
             next_pid: ClassVar[int] = 8000
 
@@ -1048,78 +995,202 @@ class TestDeadWorkerErrorReporting:
                 target: object = None,
                 args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
             ) -> None:
-                task, queue = args
-                _FirstDeadThenAliveFakeProcess.captured_tasks.append(task)
-                self._pid = _FirstDeadThenAliveFakeProcess.next_pid
-                _FirstDeadThenAliveFakeProcess.next_pid += 1
-                call = _FirstDeadThenAliveFakeProcess.call_count
-                _FirstDeadThenAliveFakeProcess.call_count += 1
-
-                if call == 0:
-                    # First worker dies without putting a result
-                    self._alive = False
-                else:
-                    # Subsequent workers succeed immediately
-                    queue.put(
-                        WorkerResult(
-                            game_id=task.game_id,
-                            result=GameResult.WHITE_WIN,
-                            termination="checkmate",
-                            move_count=20,
-                            swap_colors=task.swap_colors,
-                        )
-                    )
-                    self._alive = False
+                self._task, self._queue = args
+                _SomeDieFakeProcess.captured_tasks.append(self._task)
+                self._dies = _SomeDieFakeProcess.call_count in _SomeDieFakeProcess.dying_calls
+                _SomeDieFakeProcess.call_count += 1
+                self._pid = _SomeDieFakeProcess.next_pid
+                _SomeDieFakeProcess.next_pid += 1
+                self._alive = True
+                self.joined = False
+                _SomeDieFakeProcess.instances.append(self)
 
             @property
             def pid(self) -> int:
                 return self._pid
 
             def start(self) -> None:
-                pass
+                if self._dies:
+                    self._alive = False
+                else:
+                    self._queue.put(_white_win(self._task))
 
             def is_alive(self) -> bool:
                 return self._alive
 
             def join(self, timeout: float | None = None) -> None:
-                pass
+                if not self._alive:
+                    self.joined = True
 
             def terminate(self) -> None:
-                pass
+                self._alive = False
 
-        _FirstDeadThenAliveFakeProcess.captured_tasks = []
-        _FirstDeadThenAliveFakeProcess.call_count = 0
-        _FirstDeadThenAliveFakeProcess.next_pid = 8000
+        _patch_engines(monkeypatch, _SomeDieFakeProcess)
 
-        async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
-            return "engine_cmd", Path("/fake/dir")
+        await _run_within(_quick_config(concurrency=2), 5.0, monkeypatch)
 
-        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
-        monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
-        monkeypatch.setattr(
-            "sprt_runner.runner.multiprocessing.Process", _FirstDeadThenAliveFakeProcess
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        dead_ids = [_SomeDieFakeProcess.captured_tasks[i].game_id for i in (0, 3)]
+        for dead_id in dead_ids:
+            assert any(dead_id in e and "died unexpectedly" in e for e in errors), errors
+        assert not any(e.startswith("Aborting") for e in errors)
+        assert [m["errors"] for m in messages if m["type"] == "progress"][-1] == 2
+        assert len([m for m in messages if m["type"] == "complete"]) == 1
+        # Dead workers are joined, like every other worker the run is done with.
+        assert all(_SomeDieFakeProcess.instances[i].joined for i in (0, 3))
+
+    @pytest.mark.asyncio
+    async def test_a_full_round_of_deaths_is_fatal_within_a_poll(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Both workers dying with no result between them ends the run.
+
+        The queue timeout isn't shortened: both deaths are found on the
+        first 0.5 s poll, so the run ends well within 2 s, and no worker is
+        launched after them.
+        """
+        _DeadFakeProcess.captured_tasks = []
+        _DeadFakeProcess.next_pid = 9000
+        _patch_engines(monkeypatch, _DeadFakeProcess)
+
+        await _run_within(_quick_config(concurrency=2), 2.0, monkeypatch)
+
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        tasks = _DeadFakeProcess.captured_tasks
+        assert len(tasks) == 2
+        assert errors == [
+            f"Worker for game {tasks[0].game_id} died unexpectedly (pid=9000)",
+            f"Worker for game {tasks[1].game_id} died unexpectedly (pid=9001)",
+            "Aborting after 2 worker deaths in a row with no result",
+        ]
+        assert [m for m in messages if m["type"] == "game_result"] == []
+
+    @pytest.mark.asyncio
+    async def test_deaths_on_separate_polls_are_fatal_while_another_worker_plays(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """One slot dies twice in a row, a poll apart, while the other plays on.
+
+        Two deaths with no result in between are a full round at two workers,
+        so the run ends. The worker still playing is terminated.
+        """
+        _ScriptedFakeProcess.reset(["play_forever", "die", "die"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=2), 5.0, monkeypatch)
+
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        assert len(_ScriptedFakeProcess.instances) == 3
+        assert errors[-1] == "Aborting after 2 worker deaths in a row with no result"
+        assert len([e for e in errors if "died unexpectedly" in e]) == 2
+        assert not _ScriptedFakeProcess.instances[0].is_alive()
+
+    @pytest.mark.asyncio
+    async def test_a_result_drained_with_deaths_clears_the_count(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A result read while looking for dead workers counts as a delivered result.
+
+        At three workers, two die on the first poll. On the second, the first
+        worker delivers and exits just as the coordinator checks, while two
+        more die. Since that result, there have been two deaths, not four, so
+        the run goes on. A spy checks that the result really arrived through
+        the second check's drain, which the test depends on.
+        """
+        drains: list[list[str]] = []
+
+        def _spy(result_queue: multiprocessing.Queue[WorkerResult]) -> list[WorkerResult]:
+            drained = _drain_results(result_queue)
+            drains.append([r.game_id for r in drained])
+            return drained
+
+        monkeypatch.setattr("sprt_runner.runner._drain_results", _spy)
+        _ScriptedFakeProcess.reset(["deliver_on_second_check", "die", "die", "die", "die"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=3), 5.0, monkeypatch)
+
+        first = _ScriptedFakeProcess.instances[0].task.game_id
+        assert drains[:2] == [[], [first]]
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        assert not any(e.startswith("Aborting") for e in errors)
+        assert len([e for e in errors if "died unexpectedly" in e]) == 4
+        assert first in [m["game_id"] for m in messages if m["type"] == "game_result"]
+        assert len([m for m in messages if m["type"] == "complete"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_delivered_result_clears_the_whole_count(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Two deaths, a failed game, then two more deaths isn't a full round of three.
+
+        Two slots play on; the third has the deaths and the failed game.
+        """
+        _ScriptedFakeProcess.reset(
+            ["play_forever", "die", "die", "error", "play_forever", "die", "die"]
         )
-        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
 
-        config = RunConfig(
-            base="base-engine",
-            test="test-engine",
-            time_control=FixedTimeControl(movetime_ms=100),
-            elo0=0.0,
-            elo1=500.0,
-            book_path=None,
-            concurrency=2,
-        )
+        await _run_within(_quick_config(concurrency=3), 5.0, monkeypatch)
 
-        with caplog.at_level(logging.WARNING, logger="sprt_runner.runner"):
-            await run_sprt(config)
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        assert not any(e.startswith("Aborting") for e in errors)
+        assert len([e for e in errors if "died unexpectedly" in e]) == 4
+        assert len([m for m in messages if m["type"] == "complete"]) == 1
 
-        # The dead worker's game ID should appear in a warning log
-        dead_game_id = _FirstDeadThenAliveFakeProcess.captured_tasks[0].game_id
-        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-        assert any(dead_game_id in msg for msg in warning_msgs), (
-            f"Expected warning containing game ID {dead_game_id}, got: {warning_msgs}"
-        )
+    @pytest.mark.asyncio
+    async def test_the_fatal_message_counts_every_death_in_the_round(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Two deaths, then two more on the next poll, stop a three-worker run at four."""
+        _ScriptedFakeProcess.reset(["play_forever", "die", "die", "die", "die"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=3), 5.0, monkeypatch)
+
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        assert errors[-1] == "Aborting after 4 worker deaths in a row with no result"
+        assert not _ScriptedFakeProcess.instances[0].is_alive()
+
+    @pytest.mark.asyncio
+    async def test_an_error_result_resets_the_count(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A game that failed still came from a working worker.
+
+        One slot plays on while the other has a death, then a failed game,
+        then a death. With the failed game resetting the count, neither
+        death completes a round, so the run goes on to a decision.
+        """
+        _ScriptedFakeProcess.reset(["die", "play_forever", "error", "die"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=2), 5.0, monkeypatch)
+
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        assert not any(e.startswith("Aborting") for e in errors)
+        assert len([e for e in errors if "died unexpectedly" in e]) == 2
+        assert any("engine failed to start" in e for e in errors)
+        assert len([m for m in messages if m["type"] == "complete"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1188,6 +1259,26 @@ class TestQueueExceptionHandling:
     """
 
     @pytest.mark.asyncio
+    async def test_error_while_draining_the_queue_is_fatal(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A queue error while reading results for a death check aborts cleanly.
+
+        The worker still playing is terminated.
+        """
+        _ScriptedFakeProcess.reset(["play_forever", "die_and_break_queue"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=2), 5.0, monkeypatch)
+
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        assert errors == ["Fatal error reading result queue; aborting"]
+        assert not _ScriptedFakeProcess.instances[0].is_alive()
+
+    @pytest.mark.asyncio
     async def test_queue_empty_triggers_dead_worker_path(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1215,7 +1306,7 @@ class TestQueueExceptionHandling:
             book_path=None,
         )
 
-        await run_sprt(config)
+        await _run_within(config, 5.0, monkeypatch)
 
         captured = capsys.readouterr().out
         lines = [line for line in captured.strip().split("\n") if line]
@@ -1243,7 +1334,6 @@ class TestQueueExceptionHandling:
         monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
         monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
         monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _QueueErrorFakeProcess)
-        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
 
         config = RunConfig(
             base="base-engine",
@@ -1254,7 +1344,7 @@ class TestQueueExceptionHandling:
             book_path=None,
         )
 
-        await run_sprt(config)
+        await _run_within(config, 5.0, monkeypatch)
 
         captured = capsys.readouterr().out
         lines = [line for line in captured.strip().split("\n") if line]
@@ -1281,7 +1371,6 @@ class TestQueueExceptionHandling:
         monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
         monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
         monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _QueueErrorFakeProcess)
-        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
 
         config = RunConfig(
             base="base-engine",
@@ -1292,13 +1381,499 @@ class TestQueueExceptionHandling:
             book_path=None,
         )
 
-        await run_sprt(config)
+        await _run_within(config, 5.0, monkeypatch)
 
         captured = capsys.readouterr().out
         lines = [line for line in captured.strip().split("\n") if line]
         error_msgs = [json.loads(line) for line in lines if '"type": "error"' in line]
 
         assert any("Fatal error reading result queue" in m["message"] for m in error_msgs)
+
+
+# ---------------------------------------------------------------------------
+# Coordinator slots: results free slots, and nothing waits on a worker (#187)
+# ---------------------------------------------------------------------------
+
+_REAL_QUEUE = multiprocessing.Queue
+
+
+class _QueueRecorder:
+    """Stands in for ``multiprocessing.Queue`` and records each queue created."""
+
+    def __init__(self) -> None:
+        self.queues: list[multiprocessing.Queue[WorkerResult]] = []
+
+    def __call__(self) -> multiprocessing.Queue[WorkerResult]:
+        result_queue: multiprocessing.Queue[WorkerResult] = _REAL_QUEUE()
+        self.queues.append(result_queue)
+        return result_queue
+
+
+async def _run_within(config: RunConfig, limit_s: float, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run ``run_sprt`` and fail if it takes longer than ``limit_s``.
+
+    On a timeout, a dummy result goes onto every queue the run created. That
+    releases the executor thread blocked in ``result_queue.get``, so a
+    regression fails at the limit instead of hanging pytest's shutdown.
+    """
+    recorder = _QueueRecorder()
+    monkeypatch.setattr("sprt_runner.runner.multiprocessing.Queue", recorder)
+    try:
+        await asyncio.wait_for(run_sprt(config), timeout=limit_s)
+    except TimeoutError:
+        for result_queue in recorder.queues:
+            result_queue.put(
+                WorkerResult(
+                    game_id="unblock",
+                    result=None,
+                    termination=None,
+                    move_count=0,
+                    swap_colors=False,
+                    error="unblock",
+                )
+            )
+        pytest.fail(f"run_sprt did not finish within {limit_s} s")
+
+
+def _patch_engines(monkeypatch: pytest.MonkeyPatch, process_class: type) -> None:
+    """Resolve both engines to a fake command and use ``process_class`` for workers."""
+
+    async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+        return "engine_cmd", Path("/fake/dir")
+
+    monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
+    monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
+    monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", process_class)
+
+
+def _quick_config(concurrency: int) -> RunConfig:
+    """A config whose alternating wins and losses accept H0 after about 20 games."""
+    return RunConfig(
+        base="base-engine",
+        test="test-engine",
+        time_control=FixedTimeControl(movetime_ms=100),
+        elo0=0.0,
+        elo1=200.0,
+        book_path=None,
+        concurrency=concurrency,
+    )
+
+
+def _white_win(task: WorkerTask) -> WorkerResult:
+    """A finished game that White won."""
+    return WorkerResult(
+        game_id=task.game_id,
+        result=GameResult.WHITE_WIN,
+        termination="checkmate",
+        move_count=20,
+        swap_colors=task.swap_colors,
+    )
+
+
+class _LingeringFakeProcess:
+    """Delivers its result as soon as it starts, then stays alive until terminated.
+
+    A real worker can still be shutting down when the coordinator reads its
+    result: interpreter teardown takes time, and a result that doesn't fit in
+    the pipe's buffer (64 KiB measured on this machine) keeps the process
+    alive until it has been read. Concurrent random-engine games also tend to
+    finish together. A coordinator that frees a slot only
+    when its process exits launches nothing more and waits on the queue.
+    """
+
+    instances: ClassVar[list[_LingeringFakeProcess]] = []
+    next_pid: ClassVar[int] = 15000
+
+    def __init__(
+        self,
+        *,
+        target: object = None,
+        args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+    ) -> None:
+        self._task, self._queue = args
+        self._alive = True
+        self._pid = _LingeringFakeProcess.next_pid
+        _LingeringFakeProcess.next_pid += 1
+        _LingeringFakeProcess.instances.append(self)
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+    def start(self) -> None:
+        self._queue.put(_white_win(self._task))
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+    def terminate(self) -> None:
+        self._alive = False
+
+    def kill(self) -> None:
+        self._alive = False
+
+
+class _BusyThenFastFakeProcess:
+    """The first three workers play one long game each; the rest deliver at once.
+
+    Delivering workers stay alive until terminated (see
+    ``_LingeringFakeProcess``). ``join(timeout)`` sleeps for ``timeout`` while
+    the process is alive, as a real join does, and a join with no timeout on
+    a running process fails the test, since a real one would never return.
+    """
+
+    busy_slots: ClassVar[int] = 3
+    created: ClassVar[int] = 0
+    instances: ClassVar[list[_BusyThenFastFakeProcess]] = []
+    next_pid: ClassVar[int] = 16000
+
+    def __init__(
+        self,
+        *,
+        target: object = None,
+        args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+    ) -> None:
+        self._task, self._queue = args
+        self.busy = _BusyThenFastFakeProcess.created < _BusyThenFastFakeProcess.busy_slots
+        _BusyThenFastFakeProcess.created += 1
+        self._alive = True
+        self._pid = _BusyThenFastFakeProcess.next_pid
+        _BusyThenFastFakeProcess.next_pid += 1
+        _BusyThenFastFakeProcess.instances.append(self)
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+    def start(self) -> None:
+        if not self.busy:
+            self._queue.put(_white_win(self._task))
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        if self._alive:
+            if timeout is None:
+                raise AssertionError("join() with no timeout on a running worker never returns")
+            time.sleep(timeout)
+
+    def terminate(self) -> None:
+        self._alive = False
+
+    def kill(self) -> None:
+        self._alive = False
+
+
+class _ExitingFakeProcess:
+    """Delivers its result and exits at once, recording how many were left unreaped.
+
+    Each new worker records how many earlier workers had exited without being
+    joined when it was created. Use at concurrency 1: a real worker exits only
+    after its result is in the pipe, but this fake's put goes through the
+    queue's feeder thread, so a sibling could look dead before its result is
+    readable.
+    """
+
+    instances: ClassVar[list[_ExitingFakeProcess]] = []
+    unreaped_at_launch: ClassVar[list[int]] = []
+    next_pid: ClassVar[int] = 17000
+
+    def __init__(
+        self,
+        *,
+        target: object = None,
+        args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+    ) -> None:
+        self._task, self._queue = args
+        self._alive = True
+        self.joined = False
+        self._pid = _ExitingFakeProcess.next_pid
+        _ExitingFakeProcess.next_pid += 1
+        _ExitingFakeProcess.unreaped_at_launch.append(
+            sum(1 for p in _ExitingFakeProcess.instances if not p._alive and not p.joined)
+        )
+        _ExitingFakeProcess.instances.append(self)
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+    def start(self) -> None:
+        self._queue.put(_white_win(self._task))
+        self._alive = False
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        if not self._alive:
+            self.joined = True
+
+    def terminate(self) -> None:
+        self._alive = False
+
+    def kill(self) -> None:
+        self._alive = False
+
+
+class _ScriptedFakeProcess:
+    """Each worker follows the behaviour its creation index has in ``script``.
+
+    Workers past the end of the script follow ``default``. Behaviours:
+
+    - ``deliver``: puts a result as it starts, then stays alive until terminated.
+    - ``deliver_and_exit``: puts a result, sleeps 50 ms, then exits. The sleep
+      lets the queue's feeder thread flush the result into the pipe first,
+      which is the order a real worker exits in.
+    - ``error``: puts a result saying the game failed, then stays alive.
+    - ``die``: exits at once without a result.
+    - ``play_forever``: stays alive without a result until terminated.
+    - ``deliver_on_second_check``: on the second ``is_alive()`` call, puts a
+      result, sleeps 50 ms and exits, so its result arrives just as the
+      coordinator checks for dead workers.
+    - ``die_and_break_queue``: exits without a result and makes every
+      non-blocking ``get`` on the queue raise ``OSError``. Blocking reads
+      still work.
+
+    "Exits" means ``is_alive()`` turns False. ``join`` records a join once
+    the worker has exited.
+    """
+
+    script: ClassVar[list[str]] = []
+    default: ClassVar[str] = "deliver"
+    instances: ClassVar[list[_ScriptedFakeProcess]] = []
+    next_pid: ClassVar[int] = 19000
+
+    def __init__(
+        self,
+        *,
+        target: object = None,
+        args: tuple[WorkerTask, multiprocessing.Queue[WorkerResult]] = ...,  # type: ignore[assignment]
+    ) -> None:
+        self.task, self._queue = args
+        index = len(_ScriptedFakeProcess.instances)
+        script = _ScriptedFakeProcess.script
+        self.behaviour = script[index] if index < len(script) else _ScriptedFakeProcess.default
+        self._alive = True
+        self._checks = 0
+        self.joined = False
+        self._pid = _ScriptedFakeProcess.next_pid
+        _ScriptedFakeProcess.next_pid += 1
+        _ScriptedFakeProcess.instances.append(self)
+
+    @classmethod
+    def reset(cls, script: list[str], default: str = "deliver") -> None:
+        cls.script = script
+        cls.default = default
+        cls.instances = []
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+    def start(self) -> None:
+        if self.behaviour in ("deliver", "deliver_and_exit"):
+            self._queue.put(_white_win(self.task))
+        elif self.behaviour == "error":
+            self._queue.put(
+                WorkerResult(
+                    game_id=self.task.game_id,
+                    result=None,
+                    termination=None,
+                    move_count=0,
+                    swap_colors=self.task.swap_colors,
+                    error="engine failed to start",
+                )
+            )
+        if self.behaviour == "deliver_and_exit":
+            time.sleep(0.05)
+            self._alive = False
+        elif self.behaviour == "die":
+            self._alive = False
+        elif self.behaviour == "die_and_break_queue":
+            blocking_get = self._queue.get
+
+            def _broken(block: bool = True, timeout: float | None = None) -> WorkerResult:
+                if not block:
+                    raise OSError("result queue broken")
+                return blocking_get(block, timeout)
+
+            setattr(self._queue, "get", _broken)  # noqa: B010
+            self._alive = False
+
+    def is_alive(self) -> bool:
+        if self.behaviour == "deliver_on_second_check" and self._alive:
+            self._checks += 1
+            if self._checks == 2:
+                self._queue.put(_white_win(self.task))
+                time.sleep(0.05)
+                self._alive = False
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        if not self._alive:
+            self.joined = True
+
+    def terminate(self) -> None:
+        self._alive = False
+
+    def kill(self) -> None:
+        self._alive = False
+
+
+class TestDrainResults:
+    """Tests for _drain_results, which reads what is already waiting on the queue."""
+
+    def test_reads_every_waiting_result_in_order_then_nothing(self) -> None:
+        result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
+        results = [
+            WorkerResult(
+                game_id=f"g{i}",
+                result=GameResult.DRAW,
+                termination="stalemate",
+                move_count=i,
+                swap_colors=False,
+            )
+            for i in range(3)
+        ]
+        for result in results:
+            result_queue.put(result)
+        time.sleep(0.1)  # let the feeder thread flush all three into the pipe
+
+        assert [r.game_id for r in _drain_results(result_queue)] == ["g0", "g1", "g2"]
+        assert _drain_results(result_queue) == []
+        result_queue.close()
+        result_queue.join_thread()
+
+
+class TestCoordinatorSlots:
+    """A delivered result frees its slot at once, and no result waits on a worker (#187)."""
+
+    @pytest.mark.asyncio
+    async def test_delivered_workers_free_their_slots_before_exiting(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Four workers that deliver but haven't exited don't stall the run.
+
+        The queue timeout keeps its default, so the run can't rely on it.
+        """
+        _LingeringFakeProcess.instances = []
+        _patch_engines(monkeypatch, _LingeringFakeProcess)
+
+        await _run_within(_quick_config(concurrency=4), 5.0, monkeypatch)
+
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        assert [m for m in messages if m["type"] == "error"] == []
+        assert len([m for m in messages if m["type"] == "complete"]) == 1
+        assert len([m for m in messages if m["type"] == "game_result"]) > 4
+        # Workers that delivered but never exited are terminated when the run ends.
+        assert not any(p.is_alive() for p in _LingeringFakeProcess.instances)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_terminates_workers_that_delivered_but_never_exited(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancelling a run terminates every worker, including ones whose results were read."""
+        _LingeringFakeProcess.instances = []
+        _patch_engines(monkeypatch, _LingeringFakeProcess)
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=-0.1,
+            elo1=0.1,
+            book_path=None,
+            concurrency=2,
+        )
+
+        task = asyncio.create_task(run_sprt(config))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5.0)
+
+        assert len(_LingeringFakeProcess.instances) > 2
+        assert not any(p.is_alive() for p in _LingeringFakeProcess.instances)
+
+    @pytest.mark.asyncio
+    async def test_exited_workers_with_unread_results_are_not_reported_dead(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Every worker exits with its result unread; none is reported dead.
+
+        At three workers, two results are often waiting behind the one the
+        coordinator reads, so each check for dead workers has to read all
+        of them. Results are handled in the order they arrived. Reading what
+        is waiting must not wait for more, or each check would cost a whole
+        poll.
+        """
+        _ScriptedFakeProcess.reset([], default="deliver_and_exit")
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=3), 4.0, monkeypatch)
+
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        assert [m for m in messages if m["type"] == "error"] == []
+        assert len([m for m in messages if m["type"] == "complete"]) == 1
+        game_ids = [m["game_id"] for m in messages if m["type"] == "game_result"]
+        assert len(game_ids) > 4
+        launched = [p.task.game_id for p in _ScriptedFakeProcess.instances]
+        assert game_ids == launched[: len(game_ids)]
+
+    @pytest.mark.asyncio
+    async def test_result_handling_never_waits_on_running_workers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Three long games in progress don't slow the games finishing in the fourth slot.
+
+        Joining each running worker for a second after every result would
+        cost three seconds per game here.
+        """
+        _BusyThenFastFakeProcess.created = 0
+        _BusyThenFastFakeProcess.instances = []
+        _patch_engines(monkeypatch, _BusyThenFastFakeProcess)
+
+        await _run_within(_quick_config(concurrency=4), 3.0, monkeypatch)
+
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        assert [m for m in messages if m["type"] == "error"] == []
+        assert len([m for m in messages if m["type"] == "complete"]) == 1
+        assert len([m for m in messages if m["type"] == "game_result"]) > 4
+
+    @pytest.mark.asyncio
+    async def test_finished_workers_are_reaped_as_the_run_goes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A worker that has exited is dropped and joined before the next game launches.
+
+        Keeping every finished worker until the end of the run would hold
+        each one's ``Process`` object, and the file descriptors it keeps
+        open, for every game played.
+        """
+        _ExitingFakeProcess.instances = []
+        _ExitingFakeProcess.unreaped_at_launch = []
+        _patch_engines(monkeypatch, _ExitingFakeProcess)
+
+        await _run_within(_quick_config(concurrency=1), 3.0, monkeypatch)
+
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        assert [m for m in messages if m["type"] == "error"] == []
+        assert len(_ExitingFakeProcess.instances) > 4
+        assert max(_ExitingFakeProcess.unreaped_at_launch) == 0
+        assert all(p.joined for p in _ExitingFakeProcess.instances)
 
 
 class TestRunConfigKeepWorktrees:
@@ -1613,6 +2188,34 @@ class TestTimeLimitValidationCLI:
         message = json.loads(capsys.readouterr().out.strip())
         assert message["type"] == "error"
         assert flag in message["message"]
+
+
+class TestConcurrencyValidationCLI:
+    """--concurrency below 1 fails before any game runs, on the --tc error channel.
+
+    With no worker slot the coordinator would launch nothing and wait forever.
+    """
+
+    @pytest.mark.parametrize("value", ["0", "-1"])
+    def test_concurrency_below_one_exits_nonzero_with_stdout_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        value: str,
+    ) -> None:
+        async def _fail_if_called(config: RunConfig) -> None:
+            raise AssertionError("run_sprt must not be reached when validation fails")
+
+        monkeypatch.setattr("sprt_runner.runner.run_sprt", _fail_if_called)
+        monkeypatch.setattr("sys.argv", ["sprt_runner", *_RUN_ARGV, "--concurrency", value])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code != 0
+        message = json.loads(capsys.readouterr().out.strip())
+        assert message["type"] == "error"
+        assert "--concurrency" in message["message"]
 
 
 class TestRunSprtTimeLimitWiring:
@@ -2101,7 +2704,6 @@ class TestGracefulShutdown:
         monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
         monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
         monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _InterruptibleFakeProcess)
-        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 1.0)
 
         config = RunConfig(
             base="base-engine",
@@ -2137,7 +2739,6 @@ class TestGracefulShutdown:
         monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
         monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
         monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _InterruptibleFakeProcess)
-        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 1.0)
 
         config = RunConfig(
             base="base-engine",
@@ -2189,7 +2790,6 @@ class TestGracefulShutdown:
         monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _mock_resolve)
         monkeypatch.setattr("sprt_runner.runner.parse_engine_spec", _mock_parse_engine_spec)
         monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _InterruptibleFakeProcess)
-        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 1.0)
 
         config = RunConfig(
             base="base-engine",
