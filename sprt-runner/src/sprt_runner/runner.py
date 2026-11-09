@@ -467,6 +467,18 @@ def worker_entry(
         task: The game task to execute.
         result_queue: Queue to send results back to the coordinator.
     """
+    # A forked worker (Linux's default start method up to Python 3.13) starts
+    # with the coordinator's signal handlers. asyncio's SIGTERM handler would
+    # make it ignore ``terminate()``, so each worker still playing at a
+    # decision or a shutdown would cost 5 s, one after another, before
+    # SIGKILL. The coordinator's SIGINT handler belongs to the coordinator's
+    # event loop; Python's own handler lets ``asyncio.run`` below install this
+    # worker's. (asyncio already clears the inherited wakeup fd at fork.) A
+    # SIGTERM that lands between the fork and these lines, a window of about
+    # a millisecond, is still lost. Under spawn and forkserver both handlers
+    # are defaults already.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     worker_result = asyncio.run(_play_single_game(task))
     result_queue.put(worker_result)
 

@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import itertools
 import json
+import multiprocessing
 import os
 import shlex
 import signal
@@ -505,25 +506,36 @@ def _process_group_is_empty(pgid: int) -> bool:
 class TestSignalExit:
     """The runner exits within seconds of SIGTERM or SIGINT, even mid-game (#198)."""
 
+    @pytest.mark.parametrize("start_method", ["spawn", "fork", "forkserver"])
     @pytest.mark.parametrize(
         ("sig", "exit_code"),
         [(signal.SIGTERM, 1), (signal.SIGINT, 130)],
         ids=["SIGTERM", "SIGINT"],
     )
     def test_runner_exits_promptly_mid_game(
-        self, hung_repo_root: Path, sig: signal.Signals, exit_code: int
+        self, hung_repo_root: Path, sig: signal.Signals, exit_code: int, start_method: str
     ) -> None:
         """Two games are searching when the signal arrives.
 
         The runner must report ``interrupted`` last and exit with its usual
         code within 10 s, leaving no worker or engine processes behind. The
-        queue timeout keeps its default.
+        queue timeout keeps its default. Every start method is covered: Linux
+        defaults to fork, and a forked worker starts with the coordinator's
+        signal handling.
         """
+        if start_method not in multiprocessing.get_all_start_methods():
+            pytest.skip(f"{start_method} isn't available on this platform")
         go_log = hung_repo_root / "go.log"
+        # Runs the module as ``python -m sprt_runner`` does, the way the
+        # backend starts the runner, after choosing the start method.
+        boot = (
+            f"import multiprocessing; multiprocessing.set_start_method({start_method!r}); "
+            "import runpy; runpy.run_module('sprt_runner', run_name='__main__', alter_sys=True)"
+        )
         cmd = [
             sys.executable,
-            "-m",
-            "sprt_runner",
+            "-c",
+            boot,
             "run",
             "--base",
             "hung-engine",

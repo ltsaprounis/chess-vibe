@@ -7,6 +7,7 @@ import json
 import logging
 import multiprocessing
 import shlex
+import signal
 import time
 from pathlib import Path
 from typing import ClassVar
@@ -329,6 +330,58 @@ class TestWorkerEntry:
         assert result.game_id == "test-game"
         # Should be an error since the engine doesn't exist
         assert result.error is not None
+
+    def test_worker_restores_default_signal_handling(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A worker resets the signal handlers a fork copies from the coordinator.
+
+        Forked from the coordinator, a worker starts with asyncio's SIGTERM
+        handler, which makes it ignore ``terminate()``, and a SIGINT handler
+        that belongs to the coordinator's event loop. This installs both the
+        way a fork leaves them and checks what the worker sees while it plays:
+        SIGTERM at its default, and SIGINT handled by the worker's own
+        ``asyncio.run``, which puts Python's handler back when it ends.
+        """
+        seen: dict[str, object] = {}
+
+        async def _record(task: WorkerTask) -> WorkerResult:
+            seen["sigterm"] = signal.getsignal(signal.SIGTERM)
+            seen["sigint"] = signal.getsignal(signal.SIGINT)
+            return WorkerResult(
+                game_id=task.game_id,
+                result=GameResult.DRAW,
+                termination="stalemate",
+                move_count=0,
+                swap_colors=task.swap_colors,
+            )
+
+        def _inherited_handler(signum: int, frame: object) -> None:
+            pass
+
+        monkeypatch.setattr("sprt_runner.runner._play_single_game", _record)
+        task = WorkerTask(
+            game_id="signals",
+            white_cmd="engine",
+            black_cmd="engine",
+            game_config=GameConfig(time_control=DepthTimeControl(depth=1)),
+            swap_colors=False,
+        )
+        result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
+        old_sigterm = signal.signal(signal.SIGTERM, _inherited_handler)
+        old_sigint = signal.signal(signal.SIGINT, _inherited_handler)
+        try:
+            worker_entry(task, result_queue)
+            seen["sigint_after"] = signal.getsignal(signal.SIGINT)
+            assert result_queue.get(timeout=5).game_id == "signals"
+        finally:
+            signal.signal(signal.SIGTERM, old_sigterm)
+            signal.signal(signal.SIGINT, old_sigint)
+            result_queue.close()
+            result_queue.join_thread()
+
+        assert seen["sigterm"] is signal.SIG_DFL
+        assert seen["sigint"] is not _inherited_handler
+        assert seen["sigint"] is not signal.default_int_handler
+        assert seen["sigint_after"] is signal.default_int_handler
 
 
 class TestCleanupWorkers:
