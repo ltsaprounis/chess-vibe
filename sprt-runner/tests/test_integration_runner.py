@@ -15,9 +15,13 @@ which runs on this venv's interpreter and needs no build.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import json
+import os
 import shlex
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -417,17 +421,14 @@ class TestClockEndToEnd:
         self,
         scripted_repo_root: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """The slow engine loses on time in every game, so three wins decide the test.
 
         The outer timeout fails the test instead of hanging it if clocks stop
         being enforced: unflagged games are all draws, which never reach a
-        decision. The short queue timeout lets the reader thread exit promptly
-        after that cancellation.
+        decision.
         """
-        monkeypatch.setattr("sprt_runner.runner._QUEUE_TIMEOUT_SECONDS", 5)
         output_dir = tmp_path / "games"
         config = RunConfig(
             base="slow-engine",
@@ -469,3 +470,99 @@ class TestClockEndToEnd:
             assert len(slow_clocks) >= 2
             for before, after in itertools.pairwise(slow_clocks):
                 assert after == 0 or before - after >= 150
+
+
+@pytest.fixture
+def hung_repo_root(tmp_path: Path) -> Path:
+    """Create a temporary repo root registering an engine whose searches last 60 s.
+
+    Every ``go`` line the engine receives is appended to ``go.log``, so a test
+    can tell when a game is underway.
+    """
+    engine_dir = tmp_path / "engines" / "scripted"
+    engine_dir.mkdir(parents=True)
+    go_log = tmp_path / "go.log"
+    entry = {
+        "id": "hung-engine",
+        "name": "hung-engine",
+        "dir": "engines/scripted",
+        "build": None,
+        "run": f"{sys.executable} {_SCRIPTED_ENGINE} --sleep-ms 60000 --go-log {go_log}",
+    }
+    (tmp_path / "engines.json").write_text(json.dumps([entry]))
+    return tmp_path
+
+
+def _process_group_is_empty(pgid: int) -> bool:
+    """Return True once no process is left in the process group ``pgid``."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+class TestSignalExit:
+    """The runner exits within seconds of SIGTERM or SIGINT, even mid-game (#198)."""
+
+    @pytest.mark.parametrize(
+        ("sig", "exit_code"),
+        [(signal.SIGTERM, 1), (signal.SIGINT, 130)],
+        ids=["SIGTERM", "SIGINT"],
+    )
+    def test_runner_exits_promptly_mid_game(
+        self, hung_repo_root: Path, sig: signal.Signals, exit_code: int
+    ) -> None:
+        """Two games are searching when the signal arrives.
+
+        The runner must report ``interrupted`` last and exit with its usual
+        code within 10 s, leaving no worker or engine processes behind. The
+        queue timeout keeps its default.
+        """
+        go_log = hung_repo_root / "go.log"
+        cmd = [
+            sys.executable,
+            "-m",
+            "sprt_runner",
+            "run",
+            "--base",
+            "hung-engine",
+            "--test",
+            "hung-engine",
+            "--tc",
+            "movetime=100000",
+            "--concurrency",
+            "2",
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=hung_repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 30
+            while not (go_log.exists() and go_log.read_text().count("go ") >= 2):
+                assert proc.poll() is None, "the runner exited before both games started"
+                assert time.monotonic() < deadline, "both games didn't start within 30 s"
+                time.sleep(0.05)
+
+            proc.send_signal(sig)
+            try:
+                out, _ = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                pytest.fail(f"the runner was still running 10 s after {sig.name}")
+
+            assert proc.returncode == exit_code
+            assert [m["type"] for m in _parse_json_lines(out)][-1] == "interrupted"
+            deadline = time.monotonic() + 5
+            while not _process_group_is_empty(proc.pid):
+                assert time.monotonic() < deadline, "processes were left in the runner's group"
+                time.sleep(0.05)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
