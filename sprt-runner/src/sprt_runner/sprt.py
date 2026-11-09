@@ -1,8 +1,11 @@
 """SPRT (Sequential Probability Ratio Test) statistics for chess engine testing.
 
 Implements the log-likelihood ratio calculation and stopping conditions
-using the logistic Elo model, following the methodology used in
-Fishtest and similar chess engine testing frameworks.
+using the logistic Elo model. The LLR is a generalised one: under each
+hypothesis, the win/draw/loss probabilities are fitted by maximum
+likelihood subject to that hypothesis's expected score. It matches
+Fishtest's ``LLR_logistic`` when all three outcomes have occurred. Fishtest
+replaces zero counts with 1e-3 first, whereas this computes the exact fit.
 """
 
 from __future__ import annotations
@@ -73,11 +76,14 @@ def calculate_llr(
 ) -> float:
     """Calculate the log-likelihood ratio for SPRT.
 
-    Uses the logistic model to compute the LLR of the observed results
-    under H1 (elo=elo1) vs H0 (elo=elo0).
+    Compares the best fit to the results under H1 (expected score of elo1)
+    with the best fit under H0 (expected score of elo0), using the logistic
+    Elo model. The draw rate is fitted separately under each hypothesis.
 
-    The trinomial LLR uses win/draw/loss probabilities derived from
-    the expected score and an empirical draw ratio.
+    Reusing the observed draw ratio under both hypotheses would be wrong at
+    high draw rates. A hypothesis's win or loss probability would then
+    approach or reach zero, and a single decisive game could decide the test
+    (#196).
 
     Args:
         wins: Number of wins for the tested engine.
@@ -88,52 +94,88 @@ def calculate_llr(
 
     Returns:
         The log-likelihood ratio value.
+
+    Raises:
+        ValueError: If either bound's expected score is not strictly between
+            0 and 1. That covers bounds from about 6,382 Elo up, ``-inf``
+            and NaN.
+        OverflowError: From ``elo_to_score``, for bounds below about
+            -123,000 Elo.
     """
+    s0 = elo_to_score(elo0)
+    s1 = elo_to_score(elo1)
+    if not (0.0 < s0 < 1.0 and 0.0 < s1 < 1.0):
+        raise ValueError(
+            f"Elo bounds {elo0} and {elo1} must give an expected score strictly "
+            f"between 0 and 1; got {s0} and {s1}"
+        )
+
     total = wins + losses + draws
     if total == 0:
         return 0.0
 
-    # Observed probabilities
-    w = wins / total
-    d = draws / total
-    lo = losses / total
+    w0, d0, l0 = _fit_outcome_probabilities(wins, losses, draws, s0)
+    w1, d1, l1 = _fit_outcome_probabilities(wins, losses, draws, s1)
 
-    # Expected scores under H0 and H1
-    s0 = elo_to_score(elo0)
-    s1 = elo_to_score(elo1)
-
-    # Derive win/draw/loss probabilities from expected score and draw ratio
-    # Using the trinomial model: score = w + d/2
-    # With observed draw ratio as the estimate
-    draw_ratio = d
-
-    w0 = s0 - draw_ratio / 2.0
-    l0 = 1.0 - s0 - draw_ratio / 2.0
-    d0 = draw_ratio
-
-    w1 = s1 - draw_ratio / 2.0
-    l1 = 1.0 - s1 - draw_ratio / 2.0
-    d1 = draw_ratio
-
-    # Clamp probabilities to avoid log(0)
-    eps = 1e-12
-    w0 = max(eps, w0)
-    l0 = max(eps, l0)
-    d0 = max(eps, d0)
-    w1 = max(eps, w1)
-    l1 = max(eps, l1)
-    d1 = max(eps, d1)
-
-    # LLR = sum over categories of count * log(p1/p0)
+    # An outcome that never happened adds nothing, even where a fit gives
+    # it probability zero. One that did happen always has a positive fit.
     llr = 0.0
-    if w > 0:
-        llr += w * math.log(w1 / w0)
-    if lo > 0:
-        llr += lo * math.log(l1 / l0)
-    if d > 0:
-        llr += d * math.log(d1 / d0)
+    for count, p1, p0 in ((wins, w1, w0), (losses, l1, l0), (draws, d1, d0)):
+        if count > 0:
+            llr += count * math.log(p1 / p0)
+    return llr
 
-    return llr * total
+
+def _fit_outcome_probabilities(
+    wins: int, losses: int, draws: int, score: float
+) -> tuple[float, float, float]:
+    """Fit win, draw and loss probabilities by maximum likelihood at a fixed score.
+
+    With the expected score fixed at ``w + d/2 = score``, the draw
+    probability ``d`` is the only free parameter: ``w = score - d/2`` and
+    ``l = 1 - score - d/2``. Setting the derivative of the log-likelihood to
+    zero gives, with ``a = 2*score`` and ``b = 2*(1 - score)``::
+
+        n*d**2 - (2*draws + wins*b + losses*a)*d + draws*a*b = 0
+
+    In exact arithmetic the smaller root is the maximum and lies in
+    ``[0, min(a, b)]``. With ``B = 2*draws + wins*b + losses*a``, it is
+    computed as ``2*draws*a*b / (B + sqrt(disc))``. That is exactly 0 when
+    ``draws`` is 0, and its denominator is positive whenever ``n`` is.
+
+    The discriminant ``B**2 - 4*n*draws*a*b`` cancels catastrophically when
+    ``score`` is close to 0.5 and draws dominate. With ``t = 1 - 2*score``,
+    so that ``a = 1 - t`` and ``b = 1 + t``, it expands to
+    ``(wins + losses)**2 + 2*t*(wins - losses)*(n + draws)
+    + t**2*((wins - losses)**2 + 4*n*draws)``, which avoids that
+    cancellation. The middle term can still cancel near a double root, such
+    as the one at ``score = (wins + draws)/(wins + 2*draws)`` when there are
+    no losses, so the result is clamped at zero.
+
+    Args:
+        wins: Number of wins for the tested engine.
+        losses: Number of losses for the tested engine.
+        draws: Number of drawn games. ``wins + losses + draws`` must be positive.
+        score: Expected score of the tested engine, in (0, 1).
+
+    Returns:
+        Tuple of (win, draw, loss) probabilities.
+    """
+    a = 2.0 * score
+    b = 2.0 * (1.0 - score)
+    t = 1.0 - 2.0 * score
+    n = wins + losses + draws
+    decisive = wins + losses
+    margin = wins - losses
+    linear = 2.0 * draws + wins * b + losses * a
+    discriminant = max(
+        decisive * decisive
+        + 2.0 * t * margin * (n + draws)
+        + t * t * (margin * margin + 4.0 * n * draws),
+        0.0,
+    )
+    draw_p = 2.0 * draws * a * b / (linear + math.sqrt(discriminant))
+    return score - draw_p / 2.0, draw_p, 1.0 - score - draw_p / 2.0
 
 
 def sprt_test(
