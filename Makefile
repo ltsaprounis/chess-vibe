@@ -17,11 +17,11 @@ help: ## Show this help
 setup: ## Install all dependencies (Python venvs + npm)
 	@for component in $(PYTHON_COMPONENTS); do \
 		echo "==> Setting up $$component ..."; \
-		cd $(CURDIR)/$$component && uv venv --python $(PYTHON_VERSION) && uv sync; \
+		cd $(CURDIR)/$$component && uv sync --python $(PYTHON_VERSION) || exit $$?; \
 		echo "    ✓ $$component ready"; \
 	done
 	@echo "==> Building engines ..."
-	@cd $(CURDIR)/engines/random-engine && uv venv .venv --python $(PYTHON_VERSION) && uv pip install --python .venv/bin/python -e .
+	@cd $(CURDIR)/engines/random-engine && uv venv --clear .venv --python $(PYTHON_VERSION) && uv pip install --python .venv/bin/python -e .
 	@echo "    ✓ engines built"
 	@echo "==> Setting up frontend ..."
 	@cd $(CURDIR)/frontend && npm install
