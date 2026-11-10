@@ -20,6 +20,7 @@ import itertools
 import json
 import multiprocessing
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -519,9 +520,9 @@ class TestSignalExit:
 
         The runner must report ``interrupted`` last and exit with its usual
         code within 10 s, leaving no worker or engine processes behind. The
-        queue timeout keeps its default. Every start method is covered: Linux
-        defaults to fork, and a forked worker starts with the coordinator's
-        signal handling.
+        queue timeout keeps its default. Every start method is covered: main()
+        picks forkserver, but a caller can choose fork, and a forked worker
+        starts with the coordinator's signal handling.
         """
         if start_method not in multiprocessing.get_all_start_methods():
             pytest.skip(f"{start_method} isn't available on this platform")
@@ -573,6 +574,108 @@ class TestSignalExit:
             while not _process_group_is_empty(proc.pid):
                 assert time.monotonic() < deadline, "processes were left in the runner's group"
                 time.sleep(0.05)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+
+
+def _process_table() -> dict[int, tuple[int, str]]:
+    """Map every pid to its parent pid and command line, as ``ps`` reports them."""
+    out = subprocess.run(
+        ["ps", "-ww", "-A", "-o", "pid=,ppid=,command="],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    ).stdout
+    table: dict[int, tuple[int, str]] = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            table[int(parts[0])] = (int(parts[1]), parts[2])
+    return table
+
+
+class TestWorkerStartMethod:
+    """Run as the backend runs it, the runner starts workers from a forkserver."""
+
+    def test_workers_are_children_of_the_forkserver(self, hung_repo_root: Path) -> None:
+        """Each engine's worker was started by the forkserver, not by the runner itself.
+
+        The runner is started as ``python -m sprt_runner`` with no start method
+        chosen. Walking up from each engine process, the forkserver must come
+        before the runner. A fork or spawn would make the runner the worker's
+        parent. Each worker logs in the runner's format, though it doesn't
+        inherit the runner's logging setup. The runner must still exit
+        promptly on SIGTERM.
+        """
+        if "forkserver" not in multiprocessing.get_all_start_methods():
+            pytest.skip("forkserver isn't available on this platform")
+        go_log = hung_repo_root / "go.log"
+        cmd = [
+            sys.executable,
+            "-m",
+            "sprt_runner",
+            "run",
+            "--base",
+            "hung-engine",
+            "--test",
+            "hung-engine",
+            "--tc",
+            "movetime=100000",
+            "--concurrency",
+            "2",
+        ]
+        stderr_path = hung_repo_root / "stderr.log"
+        # Append mode, so the runner's and workers' writes never overwrite each other.
+        with stderr_path.open("a") as stderr_file:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=hung_repo_root,
+                stdout=subprocess.PIPE,
+                stderr=stderr_file,
+                text=True,
+                start_new_session=True,
+            )
+        try:
+            deadline = time.monotonic() + 30
+            while not (go_log.exists() and go_log.read_text().count("go ") >= 2):
+                assert proc.poll() is None, "the runner exited before both games started"
+                assert time.monotonic() < deadline, "both games didn't start within 30 s"
+                time.sleep(0.05)
+
+            table = _process_table()
+            engines = [pid for pid, (_, command) in table.items() if str(go_log) in command]
+            assert len(engines) >= 2
+            for engine in engines:
+                ancestors: list[str] = []
+                pid = table[engine][0]
+                while pid in table and pid != proc.pid and pid > 1:
+                    ancestors.append(table[pid][1])
+                    pid = table[pid][0]
+                assert pid == proc.pid, "the engine doesn't descend from the runner"
+                assert any("multiprocessing.forkserver" in a for a in ancestors), ancestors
+
+            proc.send_signal(signal.SIGTERM)
+            try:
+                out, _ = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                pytest.fail("the runner was still running 10 s after SIGTERM")
+            assert proc.returncode == 1
+            assert [m["type"] for m in _parse_json_lines(out)][-1] == "interrupted"
+            deadline = time.monotonic() + 5
+            while not _process_group_is_empty(proc.pid):
+                assert time.monotonic() < deadline, "processes were left in the runner's group"
+                time.sleep(0.05)
+            # Workers start the engines, so these lines come from the workers.
+            started = re.compile(
+                r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} INFO shared\.uci_client: "
+                r"Started engine process: .*scripted_uci_engine\.py",
+                re.MULTILINE,
+            )
+            assert len(started.findall(stderr_path.read_text())) >= 2
         finally:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import multiprocessing
+import re
 import shlex
 import signal
 import time
@@ -382,6 +383,68 @@ class TestWorkerEntry:
         assert seen["sigint"] is not _inherited_handler
         assert seen["sigint"] is not signal.default_int_handler
         assert seen["sigint_after"] is signal.default_int_handler
+
+
+class TestWorkerLogging:
+    """A worker sets up logging like the runner, since forkserver and spawn don't pass it on."""
+
+    def test_worker_logs_info_to_stderr_in_the_runner_format(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A worker that starts with no logging setup logs INFO, not DEBUG, to stderr.
+
+        Clearing the root logger's handlers recreates what forkserver and
+        spawn workers start with; pytest's own handlers would otherwise make
+        the setup a no-op. The game logs one INFO and one DEBUG record, as the
+        UCI client does.
+        """
+
+        async def _play(task: WorkerTask) -> WorkerResult:
+            uci_logger = logging.getLogger("shared.uci_client")
+            uci_logger.info("Started engine process: engine (pid=1)")
+            uci_logger.debug("debug detail")
+            return WorkerResult(
+                game_id=task.game_id,
+                result=GameResult.DRAW,
+                termination="stalemate",
+                move_count=0,
+                swap_colors=task.swap_colors,
+            )
+
+        monkeypatch.setattr("sprt_runner.runner._play_single_game", _play)
+        monkeypatch.setattr(logging.root, "handlers", [])
+        task = WorkerTask(
+            game_id="logs",
+            white_cmd="engine",
+            black_cmd="engine",
+            game_config=GameConfig(time_control=DepthTimeControl(depth=1)),
+            swap_colors=False,
+        )
+        result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
+        old_level = logging.root.level
+        old_sigterm = signal.getsignal(signal.SIGTERM)
+        old_sigint = signal.getsignal(signal.SIGINT)
+        try:
+            worker_entry(task, result_queue)
+            assert result_queue.get(timeout=5).game_id == "logs"
+        finally:
+            logging.root.setLevel(old_level)
+            signal.signal(signal.SIGTERM, old_sigterm)
+            signal.signal(signal.SIGINT, old_sigint)
+            result_queue.close()
+            result_queue.join_thread()
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        lines = captured.err.splitlines()
+        assert len(lines) == 1, lines
+        assert re.fullmatch(
+            r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} INFO shared\.uci_client: "
+            r"Started engine process: engine \(pid=1\)",
+            lines[0],
+        ), lines[0]
 
 
 class TestCleanupWorkers:
@@ -2207,6 +2270,72 @@ class TestMainTimeLimitWiring:
     def test_smallest_move_timeout_is_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
         config = self._run_main(monkeypatch, "--move-timeout-ms", "1")
         assert config.move_timeout_ms == 1
+
+
+class TestMainStartMethod:
+    """main() starts workers from a forkserver with the runner preloaded.
+
+    A forkserver child starts with default signal handling, unlike a fork of
+    the multi-threaded coordinator. With ``sprt_runner.runner`` preloaded it
+    starts about as fast as a fork, where spawn is markedly slower. main()
+    only chooses when nothing else has, and only where forkserver exists.
+    """
+
+    @staticmethod
+    def _run_main(monkeypatch: pytest.MonkeyPatch) -> tuple[str | None, list[list[str]]]:
+        """Run main() and return the start method run_sprt saw, and every preload set."""
+        seen: dict[str, str | None] = {}
+        preloads: list[list[str]] = []
+
+        async def _fake_run_sprt(config: RunConfig) -> None:
+            seen["method"] = multiprocessing.get_start_method(allow_none=True)
+
+        def _record_preload(modules: list[str]) -> None:
+            preloads.append(list(modules))
+
+        monkeypatch.setattr("sprt_runner.runner.run_sprt", _fake_run_sprt)
+        # Every public way to set the preload ends in this function.
+        monkeypatch.setattr("multiprocessing.forkserver.set_forkserver_preload", _record_preload)
+        monkeypatch.setattr("sys.argv", ["sprt_runner", *_RUN_ARGV])
+
+        main()
+
+        return seen["method"], preloads
+
+    def test_chooses_a_preloaded_forkserver(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        if "forkserver" not in multiprocessing.get_all_start_methods():
+            pytest.skip("forkserver isn't available on this platform")
+        multiprocessing.set_start_method(None, force=True)
+
+        method, preloads = self._run_main(monkeypatch)
+
+        assert method == "forkserver"
+        assert preloads == [["sprt_runner.runner"]]
+
+    @pytest.mark.parametrize("chosen", multiprocessing.get_all_start_methods())
+    def test_keeps_a_start_method_already_chosen(
+        self, monkeypatch: pytest.MonkeyPatch, chosen: str
+    ) -> None:
+        """Whatever the caller chose, fork and forkserver included, stays, with no preload."""
+        multiprocessing.set_start_method(chosen, force=True)
+
+        method, preloads = self._run_main(monkeypatch)
+
+        assert method == chosen
+        assert preloads == []
+
+    def test_keeps_the_default_where_forkserver_is_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        multiprocessing.set_start_method(None, force=True)
+        monkeypatch.setattr(
+            "sprt_runner.runner.multiprocessing.get_all_start_methods", lambda: ["spawn"]
+        )
+
+        method, preloads = self._run_main(monkeypatch)
+
+        assert method is None
+        assert preloads == []
 
 
 class TestTimeLimitValidationCLI:

@@ -31,6 +31,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from shared.storage.models import Game, GameResult, Move
 from shared.storage.pgn_export import export_game_to_pgn
@@ -454,6 +455,19 @@ async def _play_single_game(task: WorkerTask) -> WorkerResult:
         await black_engine.quit()
 
 
+def _configure_logging() -> None:
+    """Send INFO and above to stderr with a timestamp, level and logger name.
+
+    A no-op once the root logger has a handler, so a forked worker keeps the
+    setup it inherited.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+
 def worker_entry(
     task: WorkerTask,
     result_queue: multiprocessing.Queue[WorkerResult],
@@ -467,18 +481,24 @@ def worker_entry(
         task: The game task to execute.
         result_queue: Queue to send results back to the coordinator.
     """
-    # A forked worker (Linux's default start method up to Python 3.13) starts
-    # with the coordinator's signal handlers. asyncio's SIGTERM handler would
-    # make it ignore ``terminate()``, so each worker still playing at a
-    # decision or a shutdown would cost 5 s, one after another, before
-    # SIGKILL. The coordinator's SIGINT handler belongs to the coordinator's
-    # event loop; Python's own handler lets ``asyncio.run`` below install this
-    # worker's. (asyncio already clears the inherited wakeup fd at fork.) A
-    # SIGTERM that lands between the fork and these lines, a window of about
-    # a millisecond, is still lost. Under spawn and forkserver both handlers
-    # are defaults already.
+    # main() starts workers from a forkserver, whose children begin with
+    # default signal handling. A worker forked from the coordinator (when a
+    # caller chose fork, or for in-process callers on POSIX platforms other
+    # than macOS up to Python 3.13) starts with the coordinator's handlers
+    # instead. asyncio's SIGTERM handler would make it ignore ``terminate()``,
+    # so each worker still playing at a decision or a shutdown would cost 5 s,
+    # one after another, before SIGKILL. The coordinator's SIGINT handler
+    # belongs to the coordinator's event loop; Python's own handler lets
+    # ``asyncio.run`` below install this worker's. (asyncio already clears the
+    # inherited wakeup fd at fork.) Under fork, a SIGTERM that lands before
+    # these lines, a window of about a millisecond, is still lost; they come
+    # first to keep it short.
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     signal.signal(signal.SIGINT, signal.default_int_handler)
+    # Workers started by forkserver or spawn don't inherit the runner's
+    # logging setup, so their warnings would lose their format and their INFO
+    # lines would be dropped.
+    _configure_logging()
     worker_result = asyncio.run(_play_single_game(task))
     result_queue.put(worker_result)
 
@@ -1035,11 +1055,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     """CLI entry point for ``python -m sprt_runner``."""
     # Configure logging to stderr only
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    _configure_logging()
 
     parser = build_parser()
     args = parser.parse_args()
@@ -1104,6 +1120,19 @@ def main() -> None:
         time_margin_ms=args.time_margin_ms,
         move_timeout_ms=args.move_timeout_ms,
     )
+
+    # Start workers from a forkserver with the workers' module preloaded,
+    # unless the caller already chose a start method. A forkserver child starts
+    # with default signal handling, unlike a fork of this multi-threaded
+    # process. With the preload it also starts about as fast as a fork, which
+    # matters when games are short. In 10 ms-per-move runs spawn, macOS's
+    # default, played about 30% fewer games a minute.
+    # typeshed types this as str, but allow_none=True returns None when no
+    # start method has been chosen yet.
+    chosen = cast("str | None", multiprocessing.get_start_method(allow_none=True))
+    if chosen is None and "forkserver" in multiprocessing.get_all_start_methods():
+        multiprocessing.set_start_method("forkserver")
+        multiprocessing.set_forkserver_preload([worker_entry.__module__])
 
     try:
         asyncio.run(run_sprt(run_config))
