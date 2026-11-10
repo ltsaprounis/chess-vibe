@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -43,3 +45,18 @@ def random_engine_command() -> str:
     if cmd is None:
         pytest.skip("random-engine venv not built — run 'make setup' first")
     return cmd
+
+
+@pytest.fixture(autouse=True)
+def restore_start_method() -> Iterator[None]:
+    """Undo the process-wide start method and forkserver preload main() may set.
+
+    main() selects the forkserver, with a preload, for the whole process.
+    Without this, a test that calls main() would change how every later test
+    in the same pytest process starts workers. The preload goes back to
+    CPython's default, ``["__main__"]``.
+    """
+    method = multiprocessing.get_start_method(allow_none=True)
+    yield
+    multiprocessing.set_start_method(method, force=True)
+    multiprocessing.set_forkserver_preload(["__main__"])
