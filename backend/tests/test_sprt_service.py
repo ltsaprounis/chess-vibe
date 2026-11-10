@@ -113,9 +113,9 @@ class TestSPRTServiceMonitorTerminalStatus:
     """Tests that ``_monitor`` always writes a terminal status.
 
     The runner emits ``complete`` only when SPRT reaches a decision. Every
-    other way it can stop — a fatal error, every worker dying (which exits
-    0), SIGTERM, SIGKILL — used to leave the record at ``RUNNING`` forever,
-    un-cancellable because ``_running`` had already been popped.
+    other way it can stop — a fatal error (which exits 1), SIGTERM, SIGKILL —
+    used to leave the record at ``RUNNING`` forever, un-cancellable because
+    ``_running`` had already been popped.
     """
 
     @pytest.fixture
@@ -188,7 +188,11 @@ class TestSPRTServiceMonitorTerminalStatus:
 
     @pytest.mark.asyncio
     async def test_clean_exit_without_complete_marks_failed(self, sprt_repo: MagicMock) -> None:
-        """An all-workers-died abort breaks the runner's loop but still exits 0."""
+        """An exit of 0 without ``complete`` is still a failure.
+
+        The runner exits 1 after a fatal ``error`` (#188), but the status comes
+        from the stream, not from the exit code.
+        """
         running = self._running(
             [_json_line(type="error", message="All workers died unexpectedly")],
             returncode=0,

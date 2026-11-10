@@ -323,9 +323,9 @@ class SPRTService:
 
         The runner emits ``complete`` only when SPRT reaches a decision, and
         ``interrupted`` only on SIGINT/SIGTERM. Every other way it can stop —
-        a fail-fast startup error, every worker dying (which exits 0), a
-        SIGKILL — produces no terminal message at all, so the terminal status
-        is decided from process exit rather than from the stream.
+        a fail-fast startup error, a fatal error (which exits 1), a SIGKILL —
+        produces no terminal message at all, so the terminal status is decided
+        from process exit rather than from the stream.
 
         ``error`` deliberately does not end the test: the runner emits one per
         dead worker and per failed game and then carries on, so treating it as
