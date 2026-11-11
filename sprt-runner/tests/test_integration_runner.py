@@ -22,6 +22,7 @@ import multiprocessing
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -62,10 +63,11 @@ def _parse_json_lines(raw: str) -> list[dict[str, object]]:
 def sprt_repo_root(tmp_path: Path) -> Path:
     """Create a temporary repo root with engines.json pointing at the pre-built engine.
 
-    The real ``engines.json`` has a ``build`` command that fails if the
-    venv already exists.  This fixture creates a lightweight directory
-    structure with ``build: null`` and symlinks the real engine directory
-    so ``resolve_engine_path`` can locate the engine without rebuilding.
+    The real ``engines.json`` rebuilds the engine's venv on every run, which
+    would replace the repo's own venv under every test that uses it. This
+    fixture creates a lightweight directory structure with ``build: null``
+    and symlinks the real engine directory so ``resolve_engine_path`` can
+    locate the engine without rebuilding.
     """
     # Write engines.json without a build step
     engines_json = tmp_path / "engines.json"
@@ -676,6 +678,90 @@ class TestWorkerStartMethod:
                 re.MULTILINE,
             )
             assert len(started.findall(stderr_path.read_text())) >= 2
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+
+
+@pytest.fixture
+def registry_repo(tmp_path: Path) -> tuple[Path, str]:
+    """Create a git repo holding the real ``engines.json`` and random-engine's tracked files.
+
+    Nothing in it is built. Returns the repo root and its only commit.
+    """
+    tracked = subprocess.run(
+        ["git", "-C", str(_REPO_ROOT), "ls-files", "engines.json", "engines/random-engine"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    ).stdout.split()
+    assert "engines.json" in tracked
+    for name in tracked:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_REPO_ROOT / name, tmp_path / name)
+    git = ["git", "-C", str(tmp_path), "-c", "user.name=test", "-c", "user.email=test@invalid"]
+    for args in (
+        ["init", "-q"],
+        ["add", "-A"],
+        ["-c", "commit.gpgsign=false", "commit", "-qm", "x"],
+    ):
+        subprocess.run([*git, *args], capture_output=True, timeout=30, check=True)
+    commit = subprocess.run(
+        [*git, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30, check=True
+    ).stdout.strip()
+    return tmp_path, commit
+
+
+class TestRepeatableBuilds:
+    """The real registry entry builds random-engine twice in one directory (#188).
+
+    Base and test are resolved one after the other. With the same engine on
+    both sides they share a directory, so the second build runs over the venv
+    the first one made, as every run after the first does in a working tree.
+    """
+
+    @pytest.mark.parametrize("pinned", [False, True], ids=["working-tree", "same-commit"])
+    def test_the_same_engine_on_both_sides_plays_games(
+        self, registry_repo: tuple[Path, str], pinned: bool
+    ) -> None:
+        """Both builds succeed and a game is played, without an ``error`` line."""
+        if shutil.which("uv") is None:
+            pytest.skip("the registry's build command needs uv on PATH")
+        root, commit = registry_repo
+        spec = f"random-engine:{commit}" if pinned else "random-engine"
+        games_dir = root / "games"
+        cmd = [
+            *(sys.executable, "-m", "sprt_runner", "run", "--base", spec, "--test", spec),
+            *("--tc", "movetime=10", "--output-dir", str(games_dir)),
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 120
+            while not any(games_dir.glob("*.eval.json")):
+                if proc.poll() is not None:
+                    out, _ = proc.communicate(timeout=10)
+                    pytest.fail(f"the runner exited ({proc.returncode}) before a game:\n{out}")
+                assert time.monotonic() < deadline, "no game finished within 120 s"
+                time.sleep(0.1)
+
+            proc.send_signal(signal.SIGTERM)
+            try:
+                out, _ = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                pytest.fail("the runner was still running 30 s after SIGTERM")
+            types = [m["type"] for m in _parse_json_lines(out)]
+            assert "game_result" in types
+            assert "error" not in types
         finally:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)

@@ -11,7 +11,9 @@ inside each worker for UCI I/O. Workers report results via
 Message types:
     - ``game_result``: Result of a single game.
     - ``progress``: Running SPRT statistics.
-    - ``error``: Non-fatal error during a game.
+    - ``error``: An error. Most concern one game or worker, and the run
+      carries on. A fatal one is the run's last line, and the CLI then
+      exits 1.
     - ``complete``: Final SPRT result.
 """
 
@@ -31,7 +33,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 from shared.storage.models import Game, GameResult, Move
 from shared.storage.pgn_export import export_game_to_pgn
@@ -113,6 +115,15 @@ class RunConfig:
     test_id: str | None = None
     time_margin_ms: int = DEFAULT_TIME_MARGIN_MS
     move_timeout_ms: int = DEFAULT_MOVE_TIMEOUT_MS
+
+
+class RunAbortedError(Exception):
+    """The run stopped on a fatal error, already reported as its last ``error`` line.
+
+    The exception's message is that line's message. ``main()`` exits 1 on it,
+    so a caller that checks the exit code doesn't mistake the stop for a
+    finished test.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +235,19 @@ def format_error_message(message: str) -> str:
             "message": message,
         }
     )
+
+
+def _abort(message: str) -> NoReturn:
+    """Report a fatal error as an ``error`` line and stop the run.
+
+    Args:
+        message: Why the run stopped.
+
+    Raises:
+        RunAbortedError: Always, carrying ``message``.
+    """
+    print(format_error_message(message), flush=True)
+    raise RunAbortedError(message)
 
 
 def format_interrupted_message(games_played: int) -> str:
@@ -611,6 +635,12 @@ async def run_sprt(config: RunConfig) -> None:
 
     Args:
         config: Run configuration.
+
+    Raises:
+        RunAbortedError: If the run stopped on a fatal error, such as a failed
+            engine build, an unreadable opening book, a broken result queue,
+            or a full round of worker deaths. It's raised after the error is
+            printed and after the workers and worktrees are cleaned up.
     """
     # Register SIGTERM → cancel-task handler so SIGTERM triggers the same
     # graceful shutdown path as SIGINT (KeyboardInterrupt → CancelledError).
@@ -656,13 +686,15 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
         config: Run configuration.
         base_spec: Parsed base engine specification.
         test_spec: Parsed test engine specification.
+
+    Raises:
+        RunAbortedError: If the run stopped on a fatal error.
     """
     try:
         base_run, base_dir = await resolve_engine_path(base_spec, repo_root=config.repo_root)
         test_run, test_dir = await resolve_engine_path(test_spec, repo_root=config.repo_root)
     except Exception as e:
-        print(format_error_message(f"Failed to resolve engines: {e}"), flush=True)
-        return
+        _abort(f"Failed to resolve engines: {e}")
 
     # Load opening book
     opening_pairs: list[OpeningPair] = []
@@ -671,8 +703,7 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
             fens = load_openings(config.book_path)
             opening_pairs = make_opening_pairs(fens)
         except Exception as e:
-            print(format_error_message(f"Failed to load opening book: {e}"), flush=True)
-            return
+            _abort(f"Failed to load opening book: {e}")
 
     # SPRT tracking
     wins = 0
@@ -768,11 +799,7 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                     worker_result = None
                 except Exception:
                     logger.exception("Unexpected error while reading from result queue")
-                    print(
-                        format_error_message("Fatal error reading result queue; aborting"),
-                        flush=True,
-                    )
-                    break
+                    _abort("Fatal error reading result queue; aborting")
 
             if worker_result is not None:
                 delivered_by = running.pop(worker_result.game_id, None)
@@ -794,11 +821,7 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                     drained = _drain_results(result_queue)
                 except Exception:
                     logger.exception("Unexpected error while reading from result queue")
-                    print(
-                        format_error_message("Fatal error reading result queue; aborting"),
-                        flush=True,
-                    )
-                    break
+                    _abort("Fatal error reading result queue; aborting")
                 if drained:
                     consecutive_deaths = 0
                 pending.extend(drained)
@@ -818,14 +841,10 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                     dead_worker.join()
                 if dead and consecutive_deaths >= config.concurrency:
                     deaths = "death" if consecutive_deaths == 1 else "deaths"
-                    print(
-                        format_error_message(
-                            f"Aborting after {consecutive_deaths} worker {deaths} "
-                            "in a row with no result"
-                        ),
-                        flush=True,
+                    _abort(
+                        f"Aborting after {consecutive_deaths} worker {deaths} "
+                        "in a row with no result"
                     )
-                    break
 
             if worker_result is None:
                 continue
@@ -1136,6 +1155,9 @@ def main() -> None:
 
     try:
         asyncio.run(run_sprt(run_config))
+    except RunAbortedError:
+        # The run has already printed why it stopped, as its last line.
+        sys.exit(1)
     except KeyboardInterrupt:
         # asyncio.run() re-raises KeyboardInterrupt after cancelling the task.
         sys.exit(130)

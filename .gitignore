@@ -216,6 +216,9 @@ local_docs/
 # Backend data directory
 backend/data/
 
+# Git worktrees the SPRT runner creates for ENGINE:COMMIT specs
+.worktrees/
+
 # Lockfiles are per-machine, not committed: direct dependencies are
 # pinned exactly in each component's pyproject.toml.
 uv.lock

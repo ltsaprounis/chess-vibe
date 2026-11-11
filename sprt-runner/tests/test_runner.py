@@ -10,8 +10,9 @@ import re
 import shlex
 import signal
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,6 +27,7 @@ from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import DEFAULT_MOVE_TIMEOUT_MS, DEFAULT_TIME_MARGIN_MS, GameConfig
 from sprt_runner.openings import OpeningPair
 from sprt_runner.runner import (
+    RunAbortedError,
     RunConfig,
     WorkerResult,
     WorkerTask,
@@ -43,7 +45,7 @@ from sprt_runner.runner import (
     run_sprt,
     worker_entry,
 )
-from sprt_runner.worktree import EngineSpec
+from sprt_runner.worktree import EngineSpec, WorktreeError
 
 # Re-export for monkeypatching
 _QUEUE_TIMEOUT_SECONDS = "sprt_runner.runner._QUEUE_TIMEOUT_SECONDS"
@@ -1057,15 +1059,12 @@ class TestDeadWorkerErrorReporting:
             book_path=None,
         )
 
-        await _run_within(config, 5.0, monkeypatch)
-
-        captured = capsys.readouterr().out
-        lines = [line for line in captured.strip().split("\n") if line]
+        messages = await _run_to_fatal_stop(config, 5.0, monkeypatch, capsys)
 
         # There should be at least two error messages:
         # 1) per-game error with game ID
         # 2) the fatal stop after a full round of deaths
-        error_msgs = [json.loads(line) for line in lines if '"type": "error"' in line]
+        error_msgs = [m for m in messages if m["type"] == "error"]
         assert len(error_msgs) >= 2
 
         # First error should identify the game with game ID and PID
@@ -1172,9 +1171,8 @@ class TestDeadWorkerErrorReporting:
         _DeadFakeProcess.next_pid = 9000
         _patch_engines(monkeypatch, _DeadFakeProcess)
 
-        await _run_within(_quick_config(concurrency=2), 2.0, monkeypatch)
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=2), 2.0, monkeypatch, capsys)
 
-        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
         errors = [str(m["message"]) for m in messages if m["type"] == "error"]
         tasks = _DeadFakeProcess.captured_tasks
         assert len(tasks) == 2
@@ -1199,9 +1197,8 @@ class TestDeadWorkerErrorReporting:
         _ScriptedFakeProcess.reset(["play_forever", "die", "die"])
         _patch_engines(monkeypatch, _ScriptedFakeProcess)
 
-        await _run_within(_quick_config(concurrency=2), 5.0, monkeypatch)
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=2), 5.0, monkeypatch, capsys)
 
-        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
         errors = [str(m["message"]) for m in messages if m["type"] == "error"]
         assert len(_ScriptedFakeProcess.instances) == 3
         assert errors[-1] == "Aborting after 2 worker deaths in a row with no result"
@@ -1277,9 +1274,8 @@ class TestDeadWorkerErrorReporting:
         _ScriptedFakeProcess.reset(["play_forever", "die", "die", "die", "die"])
         _patch_engines(monkeypatch, _ScriptedFakeProcess)
 
-        await _run_within(_quick_config(concurrency=3), 5.0, monkeypatch)
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=3), 5.0, monkeypatch, capsys)
 
-        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
         errors = [str(m["message"]) for m in messages if m["type"] == "error"]
         assert errors[-1] == "Aborting after 4 worker deaths in a row with no result"
         assert not _ScriptedFakeProcess.instances[0].is_alive()
@@ -1375,21 +1371,23 @@ class TestQueueExceptionHandling:
     """
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("queue_error", [OSError, RuntimeError])
     async def test_error_while_draining_the_queue_is_fatal(
         self,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
+        queue_error: type[Exception],
     ) -> None:
         """A queue error while reading results for a death check aborts cleanly.
 
-        The worker still playing is terminated.
+        Any exception counts, not only an I/O error. The worker still playing
+        is terminated.
         """
-        _ScriptedFakeProcess.reset(["play_forever", "die_and_break_queue"])
+        _ScriptedFakeProcess.reset(["play_forever", "die_and_break_queue"], queue_error=queue_error)
         _patch_engines(monkeypatch, _ScriptedFakeProcess)
 
-        await _run_within(_quick_config(concurrency=2), 5.0, monkeypatch)
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=2), 5.0, monkeypatch, capsys)
 
-        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
         errors = [str(m["message"]) for m in messages if m["type"] == "error"]
         assert errors == ["Fatal error reading result queue; aborting"]
         assert not _ScriptedFakeProcess.instances[0].is_alive()
@@ -1422,11 +1420,8 @@ class TestQueueExceptionHandling:
             book_path=None,
         )
 
-        await _run_within(config, 5.0, monkeypatch)
-
-        captured = capsys.readouterr().out
-        lines = [line for line in captured.strip().split("\n") if line]
-        error_msgs = [json.loads(line) for line in lines if '"type": "error"' in line]
+        messages = await _run_to_fatal_stop(config, 5.0, monkeypatch, capsys)
+        error_msgs = [m for m in messages if m["type"] == "error"]
 
         # Dead-worker path should have produced error messages (not a fatal abort)
         assert any("died unexpectedly" in m["message"] for m in error_msgs)
@@ -1460,11 +1455,8 @@ class TestQueueExceptionHandling:
             book_path=None,
         )
 
-        await _run_within(config, 5.0, monkeypatch)
-
-        captured = capsys.readouterr().out
-        lines = [line for line in captured.strip().split("\n") if line]
-        error_msgs = [json.loads(line) for line in lines if '"type": "error"' in line]
+        messages = await _run_to_fatal_stop(config, 5.0, monkeypatch, capsys)
+        error_msgs = [m for m in messages if m["type"] == "error"]
 
         # Should see the fatal error message, NOT the dead-worker message
         assert any("Fatal error reading result queue" in m["message"] for m in error_msgs)
@@ -1497,13 +1489,122 @@ class TestQueueExceptionHandling:
             book_path=None,
         )
 
-        await _run_within(config, 5.0, monkeypatch)
-
-        captured = capsys.readouterr().out
-        lines = [line for line in captured.strip().split("\n") if line]
-        error_msgs = [json.loads(line) for line in lines if '"type": "error"' in line]
+        messages = await _run_to_fatal_stop(config, 5.0, monkeypatch, capsys)
+        error_msgs = [m for m in messages if m["type"] == "error"]
 
         assert any("Fatal error reading result queue" in m["message"] for m in error_msgs)
+
+    @pytest.mark.asyncio
+    async def test_any_other_exception_is_fatal_too(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An exception from ``get`` that isn't an I/O error also aborts the run."""
+        monkeypatch.setattr(_QueueErrorFakeProcess, "exception_to_raise", RuntimeError)
+        _patch_engines(monkeypatch, _QueueErrorFakeProcess)
+
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=1), 5.0, monkeypatch, capsys)
+
+        assert [m["message"] for m in messages if m["type"] == "error"] == [
+            "Fatal error reading result queue; aborting"
+        ]
+
+
+class TestSetupFailuresAreFatal:
+    """A run that can't resolve its engines or load its book is a fatal stop (#188)."""
+
+    @pytest.mark.asyncio
+    async def test_engine_build_failure_is_fatal(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A failed build is reported as the run's only line."""
+
+        async def _failing_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            raise WorktreeError("Engine build failed in 'engines/x':\nboom")
+
+        _patch_engines(monkeypatch, _FakeProcess)
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _failing_resolve)
+
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=1), 5.0, monkeypatch, capsys)
+
+        assert messages == [
+            {
+                "type": "error",
+                "message": "Failed to resolve engines: Engine build failed in 'engines/x':\nboom",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("book_name", "reason"),
+        [
+            ("missing.epd", "EPD file not found: {path}"),
+            ("book.txt", "Unsupported opening book format: '.txt' (expected .epd or .pgn)"),
+        ],
+        ids=["missing", "unsupported"],
+    )
+    async def test_book_load_failure_is_fatal(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        book_name: str,
+        reason: str,
+    ) -> None:
+        """A book that can't be loaded is reported as the run's only line.
+
+        The real loader runs, so both of its errors are covered: a missing
+        file (``FileNotFoundError``) and an unsupported suffix (``ValueError``).
+        The workers would deliver games, so a run that carried on without its
+        book would print results too.
+        """
+        _patch_engines(monkeypatch, _FakeProcess)
+        book_path = tmp_path / book_name
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=200.0,
+            book_path=book_path,
+        )
+
+        messages = await _run_to_fatal_stop(config, 5.0, monkeypatch, capsys)
+
+        message = f"Failed to load opening book: {reason.format(path=book_path)}"
+        assert messages == [{"type": "error", "message": message}]
+
+    @pytest.mark.asyncio
+    async def test_any_book_error_is_fatal(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Any exception from the loader stops the run, not only the two it raises itself.
+
+        A book that exists but can't be read raises ``PermissionError``, for one.
+        """
+
+        def _failing_load(path: Path) -> list[str]:
+            raise RuntimeError("unreadable")
+
+        _patch_engines(monkeypatch, _FakeProcess)
+        monkeypatch.setattr("sprt_runner.runner.load_openings", _failing_load)
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=200.0,
+            book_path=Path("book.epd"),
+        )
+
+        messages = await _run_to_fatal_stop(config, 5.0, monkeypatch, capsys)
+
+        assert messages == [{"type": "error", "message": "Failed to load opening book: unreadable"}]
 
 
 # ---------------------------------------------------------------------------
@@ -1549,6 +1650,24 @@ async def _run_within(config: RunConfig, limit_s: float, monkeypatch: pytest.Mon
                 )
             )
         pytest.fail(f"run_sprt did not finish within {limit_s} s")
+
+
+async def _run_to_fatal_stop(
+    config: RunConfig,
+    limit_s: float,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> list[dict[str, Any]]:
+    """Run ``run_sprt``, which must stop on a fatal error, and return its messages.
+
+    The run must raise ``RunAbortedError`` within ``limit_s``, and its last
+    line must be the ``error`` carrying the exception's message (#188).
+    """
+    with pytest.raises(RunAbortedError) as exc_info:
+        await _run_within(config, limit_s, monkeypatch)
+    messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    assert messages[-1] == {"type": "error", "message": str(exc_info.value)}
+    return messages
 
 
 def _patch_engines(monkeypatch: pytest.MonkeyPatch, process_class: type) -> None:
@@ -1752,8 +1871,8 @@ class _ScriptedFakeProcess:
       result, sleeps 50 ms and exits, so its result arrives just as the
       coordinator checks for dead workers.
     - ``die_and_break_queue``: exits without a result and makes every
-      non-blocking ``get`` on the queue raise ``OSError``. Blocking reads
-      still work.
+      non-blocking ``get`` on the queue raise ``queue_error`` (``OSError``
+      unless ``reset`` says otherwise). Blocking reads still work.
 
     "Exits" means ``is_alive()`` turns False. ``join`` records a join once
     the worker has exited.
@@ -1761,6 +1880,7 @@ class _ScriptedFakeProcess:
 
     script: ClassVar[list[str]] = []
     default: ClassVar[str] = "deliver"
+    queue_error: ClassVar[type[Exception]] = OSError
     instances: ClassVar[list[_ScriptedFakeProcess]] = []
     next_pid: ClassVar[int] = 19000
 
@@ -1782,9 +1902,15 @@ class _ScriptedFakeProcess:
         _ScriptedFakeProcess.instances.append(self)
 
     @classmethod
-    def reset(cls, script: list[str], default: str = "deliver") -> None:
+    def reset(
+        cls,
+        script: list[str],
+        default: str = "deliver",
+        queue_error: type[Exception] = OSError,
+    ) -> None:
         cls.script = script
         cls.default = default
+        cls.queue_error = queue_error
         cls.instances = []
 
     @property
@@ -1815,7 +1941,7 @@ class _ScriptedFakeProcess:
 
             def _broken(block: bool = True, timeout: float | None = None) -> WorkerResult:
                 if not block:
-                    raise OSError("result queue broken")
+                    raise _ScriptedFakeProcess.queue_error("result queue broken")
                 return blocking_get(block, timeout)
 
             setattr(self._queue, "get", _broken)  # noqa: B010
@@ -2338,6 +2464,94 @@ class TestMainStartMethod:
         assert preloads == []
 
 
+class TestMainExitCodes:
+    """main() exits 1 after a fatal stop and keeps its other exit codes (#188).
+
+    A caller that checks the exit code must not take a run that stopped on a
+    fatal error for a finished test. A fatal stop has already printed its
+    ``error`` line, so main() adds nothing to stdout. A decision still exits
+    0, Ctrl-C 130 and SIGTERM 1.
+    """
+
+    @staticmethod
+    def _exit_code(
+        monkeypatch: pytest.MonkeyPatch,
+        fake_run_sprt: Callable[[RunConfig], Awaitable[None]] | None,
+        *extra_args: str,
+    ) -> int | str | None:
+        """Run main() and return the exit status the process would end with.
+
+        ``fake_run_sprt`` replaces ``run_sprt``; with ``None`` the real one runs.
+        """
+        if fake_run_sprt is not None:
+            monkeypatch.setattr("sprt_runner.runner.run_sprt", fake_run_sprt)
+        monkeypatch.setattr("sys.argv", ["sprt_runner", *_RUN_ARGV, *extra_args])
+        try:
+            main()
+        except SystemExit as exc:
+            return exc.code
+        return 0
+
+    def test_a_fatal_stop_exits_1(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        async def _fatal(config: RunConfig) -> None:
+            print(format_error_message("boom"), flush=True)
+            raise RunAbortedError("boom")
+
+        assert self._exit_code(monkeypatch, _fatal) == 1
+        assert capsys.readouterr().out.splitlines() == [format_error_message("boom")]
+
+    def test_a_decision_exits_0(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _decided(config: RunConfig) -> None:
+            pass
+
+        assert self._exit_code(monkeypatch, _decided) == 0
+
+    def test_ctrl_c_exits_130(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _interrupted(config: RunConfig) -> None:
+            raise KeyboardInterrupt
+
+        assert self._exit_code(monkeypatch, _interrupted) == 130
+
+    def test_sigterm_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _cancelled(config: RunConfig) -> None:
+            raise asyncio.CancelledError
+
+        assert self._exit_code(monkeypatch, _cancelled) == 1
+
+    @pytest.mark.parametrize("failure", ["build", "book"])
+    def test_a_setup_failure_exits_1_through_the_real_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        failure: str,
+    ) -> None:
+        """The CLI exits 1 after a failed build or book load, with the error as its only line.
+
+        The real ``run_sprt`` runs. Engine resolution is faked and the book is
+        missing, so it stops before launching anything.
+        """
+
+        async def _resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            if failure == "build":
+                raise WorktreeError("Engine build failed")
+            return "engine_cmd", Path("/fake/dir")
+
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _resolve)
+        book = tmp_path / "missing.epd"
+
+        code = self._exit_code(monkeypatch, None, "--book", str(book))
+
+        assert code == 1
+        expected = {
+            "build": "Failed to resolve engines: Engine build failed",
+            "book": f"Failed to load opening book: EPD file not found: {book}",
+        }[failure]
+        assert capsys.readouterr().out.splitlines() == [format_error_message(expected)]
+
+
 class TestTimeLimitValidationCLI:
     """Invalid limits fail before any game runs, on the --tc error channel."""
 
@@ -2523,7 +2737,7 @@ class TestWorktreeCleanupAfterSprt:
 
     @pytest.mark.asyncio
     async def test_cleanup_called_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Worktree cleanup should be called even when run_sprt() exits due to error."""
+        """Worktree cleanup should be called even when run_sprt() stops on a fatal error."""
         created_worktrees: list[Path] = [Path("/fake/worktree/abc123")]
 
         async def _failing_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
@@ -2551,7 +2765,8 @@ class TestWorktreeCleanupAfterSprt:
             elo1=500.0,
         )
 
-        await run_sprt(config)
+        with pytest.raises(RunAbortedError):
+            await run_sprt(config)
 
         assert cleanup_calls == [Path("/fake/worktree/abc123")]
 

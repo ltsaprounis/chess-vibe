@@ -24,7 +24,7 @@
       },
       "build": {
         "type": ["string", "null"],
-        "description": "Shell command to build the engine, run from 'dir'. Use null for pre-built binaries. Examples: 'uv venv .venv && uv pip install --python .venv/bin/python -e .' (Python), 'cmake -B build && cmake --build build' (C++), 'cargo build --release' (Rust)."
+        "description": "Shell command to build the engine, run from 'dir'. Use null for pre-built binaries. Examples: 'uv venv --clear .venv && uv pip install --python .venv/bin/python -e .' (Python), 'cmake -B build && cmake --build build' (C++), 'cargo build --release' (Rust)."
       },
       "run": {
         "type": "string",
