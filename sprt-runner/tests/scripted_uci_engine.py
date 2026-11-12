@@ -10,6 +10,10 @@ the engine goes back to reading commands without answering. So ``quit`` ends
 even a search scripted never to finish, as it would on a real engine, instead
 of leaving ``UCIClient.quit`` to wait out its 5 s kill timeout.
 
+The engine can also fail to start: it can exit before reading anything, or
+sleep before reading anything, as a slow import would. That sleep isn't cut
+short by input, since an engine still importing can't read its commands.
+
 Quiet pawn moves are preferred because they cannot repeat a position, which
 keeps a game alive long enough for a scripted time loss to be the thing that
 ends it.
@@ -21,6 +25,7 @@ import argparse
 import os
 import select
 import sys
+import time
 from pathlib import Path
 
 import chess
@@ -34,6 +39,12 @@ def _parse_args() -> argparse.Namespace:
         "--first-sleep-ms", type=int, default=None, help="Sleep for the first search only"
     )
     parser.add_argument("--go-log", type=Path, default=None, help="Append each go line to a file")
+    parser.add_argument(
+        "--exit-at-start", type=int, default=None, help="Exit with this code before reading input"
+    )
+    parser.add_argument(
+        "--startup-delay-ms", type=int, default=0, help="Sleep before reading input"
+    )
     return parser.parse_args()
 
 
@@ -88,6 +99,9 @@ def _send(line: str) -> None:
 def main() -> None:
     """Run the UCI loop until ``quit`` or end of input."""
     args = _parse_args()
+    if args.exit_at_start is not None:
+        sys.exit(args.exit_at_start)
+    time.sleep(args.startup_delay_ms / 1000)
     go_log: Path | None = args.go_log
     board = chess.Board()
     searches = 0
