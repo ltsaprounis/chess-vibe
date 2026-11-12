@@ -11,6 +11,7 @@ import shlex
 import signal
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest.mock import MagicMock
@@ -23,16 +24,25 @@ from shared.time_control import (
     IncrementTimeControl,
     parse_time_control,
 )
+from shared.uci_client import UCIEngineError, UCITimeoutError
 from sprt_runner.adjudication import AdjudicationConfig
-from sprt_runner.game import DEFAULT_MOVE_TIMEOUT_MS, DEFAULT_TIME_MARGIN_MS, GameConfig
+from sprt_runner.game import (
+    DEFAULT_MOVE_TIMEOUT_MS,
+    DEFAULT_TIME_MARGIN_MS,
+    GameConfig,
+    GameOutcome,
+    TerminationReason,
+)
 from sprt_runner.openings import OpeningPair
 from sprt_runner.runner import (
+    DEFAULT_HANDSHAKE_TIMEOUT_MS,
     RunAbortedError,
     RunConfig,
     WorkerResult,
     WorkerTask,
     _cleanup_workers,  # type: ignore[reportPrivateUsage]
     _drain_results,  # type: ignore[reportPrivateUsage]
+    _play_single_game,  # type: ignore[reportPrivateUsage]
     _resolve_run_command,  # type: ignore[reportPrivateUsage]
     _terminate_all_workers,  # type: ignore[reportPrivateUsage]
     build_parser,
@@ -291,9 +301,12 @@ class TestWorkerTask:
             black_cmd="echo black",
             game_config=config,
             swap_colors=False,
+            white_label="base engine eng1",
+            black_label="test engine eng2",
         )
         assert task.game_id == "game-1"
         assert task.swap_colors is False
+        assert task.handshake_timeout_ms == DEFAULT_HANDSHAKE_TIMEOUT_MS
 
 
 class TestWorkerEntry:
@@ -311,6 +324,8 @@ class TestWorkerEntry:
             black_cmd="nonexistent_engine",
             game_config=config,
             swap_colors=False,
+            white_label="base engine eng1",
+            black_label="test engine eng2",
         )
 
         result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
@@ -331,8 +346,9 @@ class TestWorkerEntry:
         assert not result_queue.empty()
         result = result_queue.get(timeout=1)
         assert result.game_id == "test-game"
-        # Should be an error since the engine doesn't exist
+        # Should be an error since neither engine exists. White starts first.
         assert result.error is not None
+        assert result.error.startswith("base engine eng1 (White) failed to start: ")
 
     def test_worker_restores_default_signal_handling(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A worker resets the signal handlers a fork copies from the coordinator.
@@ -367,6 +383,8 @@ class TestWorkerEntry:
             black_cmd="engine",
             game_config=GameConfig(time_control=DepthTimeControl(depth=1)),
             swap_colors=False,
+            white_label="base engine eng1",
+            black_label="test engine eng2",
         )
         result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
         old_sigterm = signal.signal(signal.SIGTERM, _inherited_handler)
@@ -423,6 +441,8 @@ class TestWorkerLogging:
             black_cmd="engine",
             game_config=GameConfig(time_control=DepthTimeControl(depth=1)),
             swap_colors=False,
+            white_label="base engine eng1",
+            black_label="test engine eng2",
         )
         result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
         old_level = logging.root.level
@@ -447,6 +467,366 @@ class TestWorkerLogging:
             r"Started engine process: engine \(pid=1\)",
             lines[0],
         ), lines[0]
+
+
+@dataclass(frozen=True)
+class _Startup:
+    """How a fake engine starts.
+
+    Attributes:
+        uci_s: Seconds the engine takes to answer ``uci``.
+        isready_s: Seconds it takes to answer ``isready``.
+        exits: The engine exits at startup, so its first answer never comes.
+        unlaunchable: The engine's command can't be launched at all.
+        hangs: The engine never answers ``uci``, whatever the limit.
+        error: An exception ``uci`` raises instead of answering.
+        quit_raises: ``quit`` raises, as the real client's does when it
+            writes ``quit`` into a pipe that's already broken.
+        quit_hangs: ``quit`` never returns.
+    """
+
+    uci_s: float = 0.0
+    isready_s: float = 0.0
+    exits: bool = False
+    unlaunchable: bool = False
+    hangs: bool = False
+    error: Exception | None = None
+    quit_raises: bool = False
+    quit_hangs: bool = False
+
+
+class _StartupFakeClient:
+    """Stands in for ``UCIClient`` in ``_play_single_game``, with scripted startups.
+
+    ``startups`` maps each engine command to how that engine starts. Time is
+    simulated the way the real client counts it: an answer that takes longer
+    than the call's ``timeout``, or than ``default_timeout`` (10 s, as in the
+    real client) when no timeout is passed, raises ``UCITimeoutError`` at once.
+    """
+
+    startups: ClassVar[dict[str, _Startup]] = {}
+    instances: ClassVar[list[_StartupFakeClient]] = []
+
+    def __init__(self, engine_path: str, *, default_timeout: float = 10.0) -> None:
+        self.engine_path = engine_path
+        self.default_timeout = default_timeout
+        self.startup = _StartupFakeClient.startups[engine_path]
+        self.waiting = False
+        self.quit_called = False
+        self.quitting = False
+        _StartupFakeClient.instances.append(self)
+
+    async def start(self) -> None:
+        if self.startup.unlaunchable:
+            raise UCIEngineError(
+                f"Failed to start engine '{self.engine_path}': [Errno 2] No such file or directory"
+            )
+
+    async def uci(self, *, timeout: float | None = None) -> list[str]:
+        if self.startup.error is not None:
+            raise self.startup.error
+        if self.startup.hangs:
+            self.waiting = True
+            await asyncio.Event().wait()
+        self._answer(self.startup.uci_s, timeout)
+        return []
+
+    async def isready(self, *, timeout: float | None = None) -> None:
+        self._answer(self.startup.isready_s, timeout)
+
+    def _answer(self, seconds: float, timeout: float | None) -> None:
+        if self.startup.exits:
+            raise UCIEngineError("Engine process terminated unexpectedly (returncode=2)")
+        limit = self.default_timeout if timeout is None else timeout
+        if seconds > limit:
+            raise UCITimeoutError(f"Engine did not respond within {limit}s")
+
+    async def quit(self) -> None:
+        self.quit_called = True
+        if self.startup.quit_raises:
+            raise ConnectionResetError("Connection lost")
+        if self.startup.quit_hangs:
+            self.quitting = True
+            await asyncio.Event().wait()
+
+
+async def _drawn_game(*, white: object, black: object, config: GameConfig) -> GameOutcome:
+    """Stands in for ``play_game``: every game that gets going is drawn."""
+    return GameOutcome(result=GameResult.DRAW, termination=TerminationReason.STALEMATE, moves=[])
+
+
+def _startup_task(handshake_timeout_ms: int = DEFAULT_HANDSHAKE_TIMEOUT_MS) -> WorkerTask:
+    """A game in which the base engine, ``white-engine``, plays White against the test engine."""
+    return WorkerTask(
+        game_id="startup",
+        white_cmd="white-engine",
+        black_cmd="black-engine",
+        game_config=GameConfig(time_control=DepthTimeControl(depth=1)),
+        swap_colors=False,
+        white_label="base engine base-x",
+        black_label="test engine test-y",
+        handshake_timeout_ms=handshake_timeout_ms,
+    )
+
+
+async def _start_game(
+    monkeypatch: pytest.MonkeyPatch,
+    white: _Startup,
+    black: _Startup,
+    task: WorkerTask | None = None,
+    play: Callable[..., Awaitable[GameOutcome]] = _drawn_game,
+) -> WorkerResult:
+    """Play ``task``, by default ``_startup_task()``, with fake engines that start as given.
+
+    ``play`` stands in for ``play_game`` once both engines have started.
+    """
+    _StartupFakeClient.startups = {"white-engine": white, "black-engine": black}
+    _StartupFakeClient.instances = []
+    monkeypatch.setattr("sprt_runner.runner.UCIClient", _StartupFakeClient)
+    monkeypatch.setattr("sprt_runner.runner.play_game", play)
+    return await _play_single_game(task or _startup_task())
+
+
+class TestEngineStartup:
+    """A game whose engine can't start fails with an error naming that engine (#197).
+
+    Each engine has the task's ``handshake_timeout_ms`` to answer ``uci``, and
+    then the same again to answer ``isready``.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("white", "black", "error"),
+        [
+            (
+                _Startup(exits=True),
+                _Startup(),
+                "base engine base-x (White) failed to start: "
+                "Engine process terminated unexpectedly (returncode=2)",
+            ),
+            (
+                _Startup(),
+                _Startup(exits=True),
+                "test engine test-y (Black) failed to start: "
+                "Engine process terminated unexpectedly (returncode=2)",
+            ),
+            (
+                _Startup(exits=True),
+                _Startup(exits=True),
+                "base engine base-x (White) failed to start: "
+                "Engine process terminated unexpectedly (returncode=2)",
+            ),
+        ],
+        ids=["white", "black", "both_white_first"],
+    )
+    async def test_an_engine_that_exits_at_startup_is_named(
+        self, monkeypatch: pytest.MonkeyPatch, white: _Startup, black: _Startup, error: str
+    ) -> None:
+        result = await _start_game(monkeypatch, white, black)
+
+        assert result.result is None
+        assert result.error == error
+
+    @pytest.mark.asyncio
+    async def test_an_engine_that_cannot_be_launched_is_named(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = await _start_game(monkeypatch, _Startup(), _Startup(unlaunchable=True))
+
+        assert result.result is None
+        assert result.error == (
+            "test engine test-y (Black) failed to start: "
+            "Failed to start engine 'black-engine': [Errno 2] No such file or directory"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "slow", [_Startup(uci_s=2.0), _Startup(isready_s=2.0)], ids=["uci", "isready"]
+    )
+    async def test_an_engine_slower_than_the_limit_fails_to_start(
+        self, monkeypatch: pytest.MonkeyPatch, slow: _Startup
+    ) -> None:
+        """An answer that takes 2 s fails at a 1 s limit, though the client's own is 10 s.
+
+        Both engines are still told to quit, so one still starting doesn't outlive the game.
+        """
+        task = _startup_task(handshake_timeout_ms=1000)
+
+        result = await _start_game(monkeypatch, _Startup(), slow, task)
+
+        assert result.result is None
+        assert result.error == (
+            "test engine test-y (Black) failed to start: Engine did not respond within 1.0s"
+        )
+        assert [client.quit_called for client in _StartupFakeClient.instances] == [True, True]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("slow", "limit_ms"),
+        [
+            (_Startup(uci_s=11.0), 20_000),
+            (_Startup(isready_s=11.0), 20_000),
+            (_Startup(uci_s=35.0), 45_000),
+        ],
+        ids=["uci", "isready", "above_the_default"],
+    )
+    async def test_an_engine_within_a_raised_limit_starts(
+        self, monkeypatch: pytest.MonkeyPatch, slow: _Startup, limit_ms: int
+    ) -> None:
+        """#197's engine took 11 s to answer ``uci``. With a 20 s limit, its game is played.
+
+        A limit can also be raised past the 30 s default.
+        """
+        task = _startup_task(handshake_timeout_ms=limit_ms)
+
+        result = await _start_game(monkeypatch, slow, _Startup(), task)
+
+        assert result.error is None
+        assert result.result == GameResult.DRAW
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("seconds", "starts"),
+        [
+            (DEFAULT_HANDSHAKE_TIMEOUT_MS / 1000, True),
+            (DEFAULT_HANDSHAKE_TIMEOUT_MS / 1000 + 0.001, False),
+        ],
+        ids=["at_the_limit", "just_over"],
+    )
+    async def test_a_task_gets_the_default_limit(
+        self, monkeypatch: pytest.MonkeyPatch, seconds: float, starts: bool
+    ) -> None:
+        result = await _start_game(monkeypatch, _Startup(uci_s=seconds), _Startup())
+
+        assert (result.error is None) is starts
+
+    @pytest.mark.asyncio
+    async def test_a_failure_after_both_engines_start_names_neither(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An error from the game itself isn't blamed on either engine's start.
+
+        Here the game raises what an unparseable ``info`` line would.
+        """
+
+        async def _bad_info_line(
+            *, white: object, black: object, config: GameConfig
+        ) -> GameOutcome:
+            raise ValueError("invalid literal for int() with base 10: 'x'")
+
+        result = await _start_game(monkeypatch, _Startup(), _Startup(), play=_bad_info_line)
+
+        assert result.result is None
+        assert result.error == "invalid literal for int() with base 10: 'x'"
+
+    @pytest.mark.asyncio
+    async def test_an_error_with_no_message_is_named_by_its_type(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bare exception still says why, at startup and during the game."""
+
+        async def _bare_error(*, white: object, black: object, config: GameConfig) -> GameOutcome:
+            raise EOFError
+
+        at_start = await _start_game(monkeypatch, _Startup(error=EOFError()), _Startup())
+        in_game = await _start_game(monkeypatch, _Startup(), _Startup(), play=_bare_error)
+
+        assert at_start.error == "base engine base-x (White) failed to start: EOFError"
+        assert in_game.error == "EOFError"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("white", "black", "result", "error", "label"),
+        [
+            (
+                _Startup(exits=True, quit_raises=True),
+                _Startup(),
+                None,
+                "base engine base-x (White) failed to start: "
+                "Engine process terminated unexpectedly (returncode=2)",
+                "base engine base-x",
+            ),
+            (
+                _Startup(),
+                _Startup(exits=True, quit_raises=True),
+                None,
+                "test engine test-y (Black) failed to start: "
+                "Engine process terminated unexpectedly (returncode=2)",
+                "test engine test-y",
+            ),
+            (_Startup(quit_raises=True), _Startup(), GameResult.DRAW, None, "base engine base-x"),
+        ],
+        ids=["white_failed_to_start", "black_failed_to_start", "played_game"],
+    )
+    async def test_a_quit_that_raises_keeps_the_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        white: _Startup,
+        black: _Startup,
+        result: GameResult | None,
+        error: str | None,
+        label: str,
+    ) -> None:
+        """Quitting an engine whose pipe is already broken raises in the real client.
+
+        The game's result still comes back, the other engine is still told
+        to quit, and a warning with the traceback names the engine.
+        """
+        outcome = await _start_game(monkeypatch, white, black)
+
+        assert (outcome.result, outcome.error) == (result, error)
+        assert [client.quit_called for client in _StartupFakeClient.instances] == [True, True]
+        warnings = [
+            record
+            for record in caplog.records
+            if record.name == "sprt_runner.runner" and record.levelno == logging.WARNING
+        ]
+        assert [record.getMessage() for record in warnings] == [
+            f"Couldn't tell the {label} to quit"
+        ]
+        assert warnings[0].exc_info is not None
+        assert warnings[0].exc_info[0] is ConnectionResetError
+
+    @pytest.mark.asyncio
+    async def test_cancelling_a_game_while_it_quits_an_engine_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard around ``quit()`` doesn't swallow cancellation."""
+        game = asyncio.ensure_future(
+            _start_game(monkeypatch, _Startup(quit_hangs=True), _Startup())
+        )
+        for _ in range(100):
+            await asyncio.sleep(0)
+            if any(client.quitting for client in _StartupFakeClient.instances):
+                break
+        assert any(client.quitting for client in _StartupFakeClient.instances)
+
+        game.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await game
+
+    @pytest.mark.asyncio
+    async def test_cancelling_a_game_mid_handshake_is_not_a_failed_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancellation, such as Ctrl-C in a worker, propagates instead of failing the game.
+
+        Both engines are still told to quit.
+        """
+        game = asyncio.ensure_future(_start_game(monkeypatch, _Startup(hangs=True), _Startup()))
+        for _ in range(100):
+            await asyncio.sleep(0)
+            if any(client.waiting for client in _StartupFakeClient.instances):
+                break
+        assert any(client.waiting for client in _StartupFakeClient.instances)
+
+        game.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await game
+        assert [client.quit_called for client in _StartupFakeClient.instances] == [True, True]
 
 
 class TestCleanupWorkers:
@@ -1305,6 +1685,240 @@ class TestDeadWorkerErrorReporting:
         assert len([m for m in messages if m["type"] == "complete"]) == 1
 
 
+class TestFailedGames:
+    """A game with an error result isn't scored, but is counted in ``errors`` (#197).
+
+    The scripted workers' failed games carry the error ``engine failed to
+    start``. ``concurrency`` failed games in a row, with no scored game
+    between them, are fatal. Worker deaths keep their own count.
+    """
+
+    @pytest.mark.asyncio
+    async def test_failed_games_are_counted_in_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """At three workers, two games in every three fail, so never three in a row.
+
+        Each failure is reported and counted, both of each pair included, and
+        the run goes on to a decision.
+        """
+        _ScriptedFakeProcess.reset(["error", "error", "deliver"] * 20)
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=3), 5.0, monkeypatch)
+
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        failed = [e for e in errors if e.endswith(" failed: engine failed to start")]
+        assert len(failed) == len(errors) >= 2
+        progress = [m for m in messages if m["type"] == "progress"]
+        assert progress[0]["errors"] == 2
+        assert progress[-1]["errors"] == len(failed)
+        assert len([m for m in messages if m["type"] == "complete"]) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "test engine eng2 (Black) failed to start: Engine did not respond within 30.0s",
+            "invalid literal for int() with base 10: 'x'",
+            "",
+        ],
+        ids=["failed_start", "failed_during_the_game", "no_message"],
+    )
+    async def test_a_full_round_of_failed_games_is_fatal(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        error: str,
+    ) -> None:
+        """Three failed games in a row stop a three-worker run once they're reported.
+
+        Every failed game counts, whatever its error says, even when it's empty.
+        """
+        _ScriptedFakeProcess.reset([], default="error", error=error)
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=3), 3.0, monkeypatch, capsys)
+
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        game_ids = [worker.task.game_id for worker in _ScriptedFakeProcess.instances[:3]]
+        assert errors == [
+            *(f"Game {game_id} failed: {error}" for game_id in game_ids),
+            f"Aborting after 3 failed games in a row; the last: {error}",
+        ]
+        assert [m for m in messages if m["type"] in ("game_result", "progress")] == []
+        assert not any(worker.is_alive() for worker in _ScriptedFakeProcess.instances)
+
+    @pytest.mark.asyncio
+    async def test_the_fatal_line_repeats_the_last_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Each failed game says something different here, and the fatal line quotes the last."""
+        _ScriptedFakeProcess.reset([], default="error", error="failure {index}")
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=3), 3.0, monkeypatch, capsys)
+
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        assert [e.rsplit(": ", 1)[1] for e in errors[:3]] == ["failure 0", "failure 1", "failure 2"]
+        assert errors[3] == "Aborting after 3 failed games in a row; the last: failure 2"
+
+    @pytest.mark.asyncio
+    async def test_failed_games_after_scored_ones_are_fatal_too(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Two games are scored, then two fail in a row at two workers, which stops the run."""
+        _ScriptedFakeProcess.reset(["deliver", "deliver", "error", "error"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=2), 3.0, monkeypatch, capsys)
+
+        assert len([m for m in messages if m["type"] == "game_result"]) == 2
+        assert messages[-1]["message"] == (
+            "Aborting after 2 failed games in a row; the last: engine failed to start"
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_games_found_while_checking_for_dead_workers_count(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A real worker whose engine can't start delivers its failed game and exits.
+
+        So the coordinator often reads the failed game while it checks for
+        dead workers, rather than from its wait on the queue. Such a game is
+        reported and counted as a failed game, not as a worker death. Reading
+        results there doesn't clear the count, either: here a scored game is
+        read that way before the second failed game is handled, and the two
+        failures still stop the run. The spy checks that the second failed
+        game came through that check.
+        """
+        drains: list[list[str]] = []
+
+        def _spy(result_queue: multiprocessing.Queue[WorkerResult]) -> list[WorkerResult]:
+            drained = _drain_results(result_queue)
+            drains.append([r.game_id for r in drained])
+            return drained
+
+        monkeypatch.setattr("sprt_runner.runner._drain_results", _spy)
+        _ScriptedFakeProcess.reset(["error", "error_and_exit", "deliver_and_exit"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=2), 3.0, monkeypatch, capsys)
+
+        second = _ScriptedFakeProcess.instances[1].task.game_id
+        assert [second] in drains
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        assert not any("died unexpectedly" in e for e in errors)
+        assert errors[-1] == (
+            "Aborting after 2 failed games in a row; the last: engine failed to start"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_game_found_while_checking_for_dead_workers_clears_the_deaths(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A failed game read while looking for dead workers resets the death count.
+
+        At three workers, two die on the first poll. On the second, the first
+        worker delivers a failed game and exits just as the coordinator
+        checks, while two more die. Its worker ran, so since its result there
+        have been two deaths, not four, and the run goes on to a decision.
+        """
+        drains: list[list[str]] = []
+
+        def _spy(result_queue: multiprocessing.Queue[WorkerResult]) -> list[WorkerResult]:
+            drained = _drain_results(result_queue)
+            drains.append([r.game_id for r in drained])
+            return drained
+
+        monkeypatch.setattr("sprt_runner.runner._drain_results", _spy)
+        _ScriptedFakeProcess.reset(["error_on_second_check", "die", "die", "die", "die"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=3), 5.0, monkeypatch)
+
+        first = _ScriptedFakeProcess.instances[0].task.game_id
+        assert drains[:2] == [[], [first]]
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        assert not any(e.startswith("Aborting") for e in errors)
+        assert len([e for e in errors if "died unexpectedly" in e]) == 4
+        assert f"Game {first} failed: engine failed to start" in errors
+        assert len([m for m in messages if m["type"] == "complete"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_one_failed_game_is_fatal_at_one_worker(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _ScriptedFakeProcess.reset(["error"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=1), 3.0, monkeypatch, capsys)
+
+        assert messages[-1]["message"] == (
+            "Aborting after 1 failed game in a row; the last: engine failed to start"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_worker_death_neither_clears_nor_adds_to_the_count(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """One slot plays on while the other has a failed game, a death, then a failed game.
+
+        At two workers those are two failed games in a row: the death between
+        them is neither a scored game nor a failed one.
+        """
+        _ScriptedFakeProcess.reset(["play_forever", "error", "die", "error"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
+
+        messages = await _run_to_fatal_stop(_quick_config(concurrency=2), 3.0, monkeypatch, capsys)
+
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        assert len([e for e in errors if "died unexpectedly" in e]) == 1
+        assert errors[-1] == (
+            "Aborting after 2 failed games in a row; the last: engine failed to start"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tasks_name_their_engines_by_role_and_spec(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Whichever colour the test engine has, a task's labels say which engine is which.
+
+        The labels keep each spec's commit, which tells two commits of one engine apart.
+        """
+        _FakeProcess.captured_tasks = []
+        _patch_engines(monkeypatch, _FakeProcess)
+        config = _quick_config(concurrency=1)
+        config.base = "lab:abc1234"
+        config.test = "lab:def5678"
+
+        await run_sprt(config)
+
+        tasks = _FakeProcess.captured_tasks
+        assert {task.swap_colors for task in tasks} == {False, True}
+        base, test = "base engine lab:abc1234", "test engine lab:def5678"
+        for task in tasks:
+            expected = (test, base) if task.swap_colors else (base, test)
+            assert (task.white_label, task.black_label) == expected
+
+
 # ---------------------------------------------------------------------------
 # Queue exception handling tests
 # ---------------------------------------------------------------------------
@@ -1864,12 +2478,17 @@ class _ScriptedFakeProcess:
     - ``deliver_and_exit``: puts a result, sleeps 50 ms, then exits. The sleep
       lets the queue's feeder thread flush the result into the pipe first,
       which is the order a real worker exits in.
-    - ``error``: puts a result saying the game failed, then stays alive.
+    - ``error``: puts a result saying the game failed, with ``reset``'s
+      ``error`` as its message, then stays alive. ``{index}`` in that message
+      becomes the worker's creation index.
+    - ``error_and_exit``: puts that failed game, sleeps 50 ms, then exits, as a
+      real worker whose engine couldn't start does.
     - ``die``: exits at once without a result.
     - ``play_forever``: stays alive without a result until terminated.
     - ``deliver_on_second_check``: on the second ``is_alive()`` call, puts a
       result, sleeps 50 ms and exits, so its result arrives just as the
       coordinator checks for dead workers.
+    - ``error_on_second_check``: the same, with a failed game.
     - ``die_and_break_queue``: exits without a result and makes every
       non-blocking ``get`` on the queue raise ``queue_error`` (``OSError``
       unless ``reset`` says otherwise). Blocking reads still work.
@@ -1881,6 +2500,7 @@ class _ScriptedFakeProcess:
     script: ClassVar[list[str]] = []
     default: ClassVar[str] = "deliver"
     queue_error: ClassVar[type[Exception]] = OSError
+    error: ClassVar[str] = "engine failed to start"
     instances: ClassVar[list[_ScriptedFakeProcess]] = []
     next_pid: ClassVar[int] = 19000
 
@@ -1892,6 +2512,7 @@ class _ScriptedFakeProcess:
     ) -> None:
         self.task, self._queue = args
         index = len(_ScriptedFakeProcess.instances)
+        self.index = index
         script = _ScriptedFakeProcess.script
         self.behaviour = script[index] if index < len(script) else _ScriptedFakeProcess.default
         self._alive = True
@@ -1907,31 +2528,35 @@ class _ScriptedFakeProcess:
         script: list[str],
         default: str = "deliver",
         queue_error: type[Exception] = OSError,
+        error: str = "engine failed to start",
     ) -> None:
         cls.script = script
         cls.default = default
         cls.queue_error = queue_error
+        cls.error = error
         cls.instances = []
 
     @property
     def pid(self) -> int:
         return self._pid
 
+    def _result(self) -> WorkerResult:
+        """This worker's result: a failed game for the ``error`` behaviours, else a win."""
+        if not self.behaviour.startswith("error"):
+            return _white_win(self.task)
+        return WorkerResult(
+            game_id=self.task.game_id,
+            result=None,
+            termination=None,
+            move_count=0,
+            swap_colors=self.task.swap_colors,
+            error=_ScriptedFakeProcess.error.replace("{index}", str(self.index)),
+        )
+
     def start(self) -> None:
-        if self.behaviour in ("deliver", "deliver_and_exit"):
-            self._queue.put(_white_win(self.task))
-        elif self.behaviour == "error":
-            self._queue.put(
-                WorkerResult(
-                    game_id=self.task.game_id,
-                    result=None,
-                    termination=None,
-                    move_count=0,
-                    swap_colors=self.task.swap_colors,
-                    error="engine failed to start",
-                )
-            )
-        if self.behaviour == "deliver_and_exit":
+        if self.behaviour in ("deliver", "deliver_and_exit", "error", "error_and_exit"):
+            self._queue.put(self._result())
+        if self.behaviour in ("deliver_and_exit", "error_and_exit"):
             time.sleep(0.05)
             self._alive = False
         elif self.behaviour == "die":
@@ -1948,10 +2573,11 @@ class _ScriptedFakeProcess:
             self._alive = False
 
     def is_alive(self) -> bool:
-        if self.behaviour == "deliver_on_second_check" and self._alive:
+        on_second_check = ("deliver_on_second_check", "error_on_second_check")
+        if self.behaviour in on_second_check and self._alive:
             self._checks += 1
             if self._checks == 2:
-                self._queue.put(_white_win(self.task))
+                self._queue.put(self._result())
                 time.sleep(0.05)
                 self._alive = False
         return self._alive
@@ -2359,6 +2985,12 @@ class TestTimeLimitFlagsCLI:
         assert args.time_margin_ms == 250
         assert args.move_timeout_ms == 45_000
 
+    def test_handshake_timeout(self) -> None:
+        default = build_parser().parse_args(_RUN_ARGV).handshake_timeout_ms
+        assert default == DEFAULT_HANDSHAKE_TIMEOUT_MS == 30_000
+        args = build_parser().parse_args([*_RUN_ARGV, "--handshake-timeout-ms", "45000"])
+        assert args.handshake_timeout_ms == 45_000
+
 
 class TestMainTimeLimitWiring:
     """main()-level tests proving the flags reach RunConfig.
@@ -2396,6 +3028,14 @@ class TestMainTimeLimitWiring:
     def test_smallest_move_timeout_is_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
         config = self._run_main(monkeypatch, "--move-timeout-ms", "1")
         assert config.move_timeout_ms == 1
+
+    def test_handshake_timeout_reaches_run_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._run_main(monkeypatch, "--handshake-timeout-ms", "45000")
+        assert config.handshake_timeout_ms == 45_000
+
+    def test_smallest_handshake_timeout_is_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._run_main(monkeypatch, "--handshake-timeout-ms", "1")
+        assert config.handshake_timeout_ms == 1
 
 
 class TestMainStartMethod:
@@ -2561,8 +3201,16 @@ class TestTimeLimitValidationCLI:
             ("--time-margin-ms", "-1"),
             ("--move-timeout-ms", "0"),
             ("--move-timeout-ms", "-1"),
+            ("--handshake-timeout-ms", "0"),
+            ("--handshake-timeout-ms", "-1"),
         ],
-        ids=["negative_margin", "zero_timeout", "negative_timeout"],
+        ids=[
+            "negative_margin",
+            "zero_timeout",
+            "negative_timeout",
+            "zero_handshake",
+            "negative_handshake",
+        ],
     )
     def test_invalid_limit_exits_nonzero_with_stdout_error(
         self,
@@ -2653,6 +3301,36 @@ class TestRunSprtTimeLimitWiring:
         assert len(game_configs) >= 2
         assert {config.time_margin_ms for config in game_configs} == {250}
         assert {config.move_timeout_ms for config in game_configs} == {45_000}
+
+    @pytest.mark.asyncio
+    async def test_handshake_limit_reaches_every_task(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await self._captured_game_configs(
+            monkeypatch,
+            RunConfig(
+                base="base-engine",
+                test="test-engine",
+                time_control=FixedTimeControl(movetime_ms=100),
+                elo0=0.0,
+                elo1=500.0,
+                handshake_timeout_ms=45_000,
+            ),
+        )
+
+        tasks = _FakeProcess.captured_tasks
+        assert len(tasks) >= 2
+        assert {task.handshake_timeout_ms for task in tasks} == {45_000}
+
+    def test_run_config_defaults_to_the_cli_default(self) -> None:
+        config = RunConfig(
+            base="base-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=5.0,
+        )
+        assert config.handshake_timeout_ms == DEFAULT_HANDSHAKE_TIMEOUT_MS
 
 
 class TestWorktreeCleanupAfterSprt:

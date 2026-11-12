@@ -41,7 +41,12 @@ from shared.time_control import (
 from shared.uci_client import UCIClient
 from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig, TerminationReason, play_game
-from sprt_runner.runner import RunConfig, run_sprt
+from sprt_runner.runner import (
+    RunConfig,
+    WorkerTask,
+    _play_single_game,  # type: ignore[reportPrivateUsage]
+    run_sprt,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -767,3 +772,140 @@ class TestRepeatableBuilds:
                 os.killpg(proc.pid, signal.SIGKILL)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=10)
+
+
+@pytest.fixture
+def startup_repo_root(tmp_path: Path) -> Path:
+    """Create a temporary repo root registering engines that start well, never or slowly.
+
+    ``exiting-engine`` exits with code 2 before reading its input, and
+    ``slow-starter`` sleeps 4 s before reading it.
+    """
+    engine_dir = tmp_path / "engines" / "scripted"
+    engine_dir.mkdir(parents=True)
+
+    def _entry(engine_id: str, *engine_args: str) -> dict[str, object]:
+        return {
+            "id": engine_id,
+            "name": engine_id,
+            "dir": "engines/scripted",
+            "build": None,
+            "run": " ".join([sys.executable, str(_SCRIPTED_ENGINE), *engine_args]),
+        }
+
+    entries = [
+        _entry("base-engine"),
+        _entry("exiting-engine", "--exit-at-start", "2"),
+        _entry("slow-starter", "--startup-delay-ms", "4000"),
+    ]
+    (tmp_path / "engines.json").write_text(json.dumps(entries))
+    return tmp_path
+
+
+def _run_cli(root: Path, limit_s: float, *args: str) -> tuple[int, list[dict[str, object]]]:
+    """Run the runner CLI in ``root`` and return its exit code and messages.
+
+    Fails the test if the runner is still running after ``limit_s``, or if
+    it leaves a process behind in its process group.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "sprt_runner", "run", *args],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        try:
+            out, _ = proc.communicate(timeout=limit_s)
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"the runner was still running after {limit_s} s")
+        deadline = time.monotonic() + 10
+        while not _process_group_is_empty(proc.pid):
+            assert time.monotonic() < deadline, "processes were left in the runner's group"
+            time.sleep(0.05)
+        return proc.returncode, _parse_json_lines(out)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
+
+
+class TestGamesThatCannotStart:
+    """A run whose engine can't start stops with exit 1, naming the engine (#197).
+
+    Every game fails, so at two workers the run stops after its first two
+    games: each is reported, and then the fatal ``error`` comes last.
+    """
+
+    @staticmethod
+    def _assert_stopped_naming(code: int, messages: list[dict[str, object]], engine: str) -> None:
+        """Check the run stopped after two failed games, each failure naming ``engine``.
+
+        ``engine`` is a regex for the start of the failure, from the engine's name onwards.
+        """
+        assert code == 1
+        assert [m for m in messages if m["type"] == "game_result"] == []
+        errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+        assert len(errors) == 3, errors
+        for error in errors[:2]:
+            assert re.match(rf"Game \S+ failed: {engine}", error), error
+        fatal = rf"Aborting after 2 failed games in a row; the last: {engine}"
+        assert re.match(fatal, errors[2]), errors[2]
+
+    def test_an_engine_that_exits_at_startup(self, startup_repo_root: Path) -> None:
+        code, messages = _run_cli(
+            startup_repo_root,
+            60,
+            *("--base", "base-engine", "--test", "exiting-engine"),
+            *("--tc", "movetime=100", "--concurrency", "2"),
+        )
+
+        engine = r"test engine exiting-engine \((White|Black)\) failed to start: "
+        self._assert_stopped_naming(code, messages, engine)
+
+    def test_an_engine_slower_than_the_limit(self, startup_repo_root: Path) -> None:
+        """The slow starter takes 4 s to read ``uci``, against a 1.5 s limit."""
+        code, messages = _run_cli(
+            startup_repo_root,
+            60,
+            *("--base", "base-engine", "--test", "slow-starter"),
+            *("--tc", "movetime=100", "--concurrency", "2", "--handshake-timeout-ms", "1500"),
+        )
+
+        engine = (
+            r"test engine slow-starter \((White|Black)\) failed to start: "
+            r"Engine did not respond within "
+        )
+        self._assert_stopped_naming(code, messages, engine)
+
+
+class TestSlowStartWithinTheDefaultLimit:
+    """#197's slowest engine, 11 s to answer ``uci``, now gets its game."""
+
+    @pytest.mark.asyncio
+    async def test_an_engine_slower_than_10_s_starts(self) -> None:
+        """Before #197 the handshake used the client's 10 s default, so this game failed."""
+        slow = shlex.join([sys.executable, str(_SCRIPTED_ENGINE), "--startup-delay-ms", "11000"])
+        fast = shlex.join([sys.executable, str(_SCRIPTED_ENGINE)])
+        task = WorkerTask(
+            game_id="slow-start",
+            white_cmd=slow,
+            black_cmd=fast,
+            game_config=GameConfig(
+                time_control=DepthTimeControl(depth=1),
+                adjudication=_NO_ADJUDICATION,
+                max_moves=1,
+            ),
+            swap_colors=False,
+            white_label="base engine slow",
+            black_label="test engine fast",
+        )
+
+        result = await asyncio.wait_for(_play_single_game(task), timeout=60)
+
+        assert result.error is None
+        assert result.result == GameResult.DRAW
+        assert result.termination == TerminationReason.MAX_MOVES.value

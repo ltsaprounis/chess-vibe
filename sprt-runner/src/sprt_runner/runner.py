@@ -68,6 +68,17 @@ logger = logging.getLogger(__name__)
 # Results are read as soon as they arrive, whatever this is set to.
 _QUEUE_TIMEOUT_SECONDS: float = 0.5
 
+# How long an engine has to answer ``uci``, and then again to answer
+# ``isready``, as a game starts. Measured on an M4 Max through this CLI at 9
+# workers, a stand-in for a numba lab engine (numpy, numba and 12 cached njit
+# kernels, run from its own venv) took at most 3.1 s, in the first round
+# after a build that left its caches cold, and 1.2 s once warm. Run through
+# ``uv run --with`` on every launch, it took at most 5.7 s. 30 s leaves room
+# for heavier imports and a busier machine. An engine that hangs at startup
+# costs a worker the limit, or twice it if the engine answers ``uci`` and then
+# hangs on ``isready``, plus up to 5 s while it's told to quit.
+DEFAULT_HANDSHAKE_TIMEOUT_MS: int = 30_000
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -97,6 +108,8 @@ class RunConfig:
             See :class:`~sprt_runner.game.GameConfig`.
         move_timeout_ms: Limit on depth and nodes searches, in milliseconds.
             See :class:`~sprt_runner.game.GameConfig`.
+        handshake_timeout_ms: Limit on each of an engine's answers to ``uci``
+            and ``isready`` when a game starts, in milliseconds.
     """
 
     base: str
@@ -115,6 +128,7 @@ class RunConfig:
     test_id: str | None = None
     time_margin_ms: int = DEFAULT_TIME_MARGIN_MS
     move_timeout_ms: int = DEFAULT_MOVE_TIMEOUT_MS
+    handshake_timeout_ms: int = DEFAULT_HANDSHAKE_TIMEOUT_MS
 
 
 class RunAbortedError(Exception):
@@ -179,7 +193,9 @@ def format_progress_message(
         lower_bound: Lower SPRT boundary.
         upper_bound: Upper SPRT boundary.
         games_total: Total games played.
-        errors: Number of games lost to dead workers.
+        errors: Number of games that ended without a result: games whose
+            worker died, and failed games, such as one whose engine couldn't
+            start.
 
     Returns:
         Single-line JSON string.
@@ -397,6 +413,11 @@ class WorkerTask:
         black_cmd: Resolved command for the black engine.
         game_config: Configuration for this game.
         swap_colors: Whether colours are swapped (test plays white).
+        white_label: How errors name the white engine, such as
+            ``base engine random-engine``.
+        black_label: How errors name the black engine.
+        handshake_timeout_ms: Limit on each of an engine's answers to ``uci``
+            and ``isready``, in milliseconds.
     """
 
     game_id: str
@@ -404,6 +425,9 @@ class WorkerTask:
     black_cmd: str
     game_config: GameConfig
     swap_colors: bool
+    white_label: str
+    black_label: str
+    handshake_timeout_ms: int = DEFAULT_HANDSHAKE_TIMEOUT_MS
 
 
 @dataclass(frozen=True)
@@ -429,26 +453,51 @@ class WorkerResult:
     start_fen: str | None = None
 
 
+def _describe(error: Exception) -> str:
+    """Return an exception's message, or its type's name when it has none."""
+    return str(error) or type(error).__name__
+
+
+def _failed_game(task: WorkerTask, error: str) -> WorkerResult:
+    """Return the result of a game that ended without one, saying why."""
+    return WorkerResult(
+        game_id=task.game_id,
+        result=None,
+        termination=None,
+        move_count=0,
+        swap_colors=task.swap_colors,
+        error=error,
+    )
+
+
 async def _play_single_game(task: WorkerTask) -> WorkerResult:
     """Play a single game (async, runs inside a worker process).
+
+    White's engine starts first, then Black's. Each must answer ``uci`` and
+    then ``isready``, each within the task's ``handshake_timeout_ms``. An
+    engine that can't start fails the game with an error naming it.
 
     Args:
         task: The game task to execute.
 
     Returns:
-        WorkerResult with the game outcome.
+        WorkerResult with the game outcome, or with an error if the game failed.
     """
     white_engine = UCIClient(task.white_cmd)
     black_engine = UCIClient(task.black_cmd)
+    handshake_timeout_s = task.handshake_timeout_ms / 1000
 
     try:
-        await white_engine.start()
-        await white_engine.uci()
-        await white_engine.isready()
-
-        await black_engine.start()
-        await black_engine.uci()
-        await black_engine.isready()
+        for engine, label, colour in (
+            (white_engine, task.white_label, "White"),
+            (black_engine, task.black_label, "Black"),
+        ):
+            try:
+                await engine.start()
+                await engine.uci(timeout=handshake_timeout_s)
+                await engine.isready(timeout=handshake_timeout_s)
+            except Exception as e:
+                return _failed_game(task, f"{label} ({colour}) failed to start: {_describe(e)}")
 
         outcome = await play_game(
             white=white_engine,
@@ -466,17 +515,16 @@ async def _play_single_game(task: WorkerTask) -> WorkerResult:
             start_fen=outcome.start_fen,
         )
     except Exception as e:
-        return WorkerResult(
-            game_id=task.game_id,
-            result=None,
-            termination=None,
-            move_count=0,
-            swap_colors=task.swap_colors,
-            error=str(e),
-        )
+        return _failed_game(task, _describe(e))
     finally:
-        await white_engine.quit()
-        await black_engine.quit()
+        # quit() raises when it writes into a pipe the engine has already
+        # closed, as an engine that failed to start or crashed can leave it.
+        # The game's result must still be returned, and the other engine quit.
+        for engine, label in ((white_engine, task.white_label), (black_engine, task.black_label)):
+            try:
+                await engine.quit()
+            except Exception:
+                logger.warning("Couldn't tell the %s to quit", label, exc_info=True)
 
 
 def _configure_logging() -> None:
@@ -639,8 +687,9 @@ async def run_sprt(config: RunConfig) -> None:
     Raises:
         RunAbortedError: If the run stopped on a fatal error, such as a failed
             engine build, an unreadable opening book, a broken result queue,
-            or a full round of worker deaths. It's raised after the error is
-            printed and after the workers and worktrees are cleaned up.
+            or a full round of worker deaths or of failed games. It's raised
+            after the error is printed and after the workers and worktrees
+            are cleaned up.
     """
     # Register SIGTERM → cancel-task handler so SIGTERM triggers the same
     # graceful shutdown path as SIGINT (KeyboardInterrupt → CancelledError).
@@ -713,6 +762,9 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
     games_played = 0
     pair_index = 0
 
+    base_label = f"base engine {config.base}"
+    test_label = f"test engine {config.test}"
+
     # Game persistence — save games when output_dir is provided
     output_dir = config.output_dir
     if output_dir is not None:
@@ -731,6 +783,8 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
     pending: collections.deque[WorkerResult] = collections.deque()
     # Deaths since the last delivered result. A full round of them is fatal.
     consecutive_deaths = 0
+    # Failed games since the last scored one. A full round of them is fatal too.
+    consecutive_failures = 0
 
     try:
         while True:
@@ -750,11 +804,11 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
 
                 # Determine colour assignment
                 if swap_colors:
-                    white_run, white_dir = test_run, test_dir
-                    black_run, black_dir = base_run, base_dir
+                    white_run, white_dir, white_label = test_run, test_dir, test_label
+                    black_run, black_dir, black_label = base_run, base_dir, base_label
                 else:
-                    white_run, white_dir = base_run, base_dir
-                    black_run, black_dir = test_run, test_dir
+                    white_run, white_dir, white_label = base_run, base_dir, base_label
+                    black_run, black_dir, black_label = test_run, test_dir, test_label
 
                 white_cmd = _resolve_run_command(white_run, white_dir)
                 black_cmd = _resolve_run_command(black_run, black_dir)
@@ -774,6 +828,9 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                     black_cmd=black_cmd,
                     game_config=game_config,
                     swap_colors=swap_colors,
+                    white_label=white_label,
+                    black_label=black_label,
+                    handshake_timeout_ms=config.handshake_timeout_ms,
                 )
 
                 worker = multiprocessing.Process(
@@ -805,6 +862,8 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                 delivered_by = running.pop(worker_result.game_id, None)
                 if delivered_by is not None:
                     finished.append(delivered_by)
+                # A failed game's result resets this too, since its worker
+                # ran. Failed games have their own count.
                 consecutive_deaths = 0
             finished = _cleanup_workers(finished)
 
@@ -849,20 +908,33 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
             if worker_result is None:
                 continue
 
-            # Handle result
+            # Handle result. A failed game, such as one whose engine couldn't
+            # start, is left out of the score, since it wasn't played. Scoring
+            # it as a loss for the side that failed would hand the other side
+            # wins whenever an engine is broken or the machine is overloaded.
+            # It's counted in ``errors`` instead, so it can't go unseen (#197).
             if worker_result.error is not None:
+                errors += 1
+                consecutive_failures += 1
                 print(
                     format_error_message(
                         f"Game {worker_result.game_id} failed: {worker_result.error}"
                     ),
                     flush=True,
                 )
+                if consecutive_failures >= config.concurrency:
+                    games = "game" if consecutive_failures == 1 else "games"
+                    _abort(
+                        f"Aborting after {consecutive_failures} failed {games} in a row; "
+                        f"the last: {worker_result.error}"
+                    )
                 continue
 
             if worker_result.result is None:
                 continue
 
             games_played += 1
+            consecutive_failures = 0
 
             # Determine result from test engine's perspective
             if worker_result.swap_colors:
@@ -1067,6 +1139,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MOVE_TIMEOUT_MS,
         help="Limit on depth and nodes searches (ms)",
     )
+    run_parser.add_argument(
+        "--handshake-timeout-ms",
+        type=int,
+        default=DEFAULT_HANDSHAKE_TIMEOUT_MS,
+        help="Limit on each of an engine's answers to uci and isready as a game starts (ms)",
+    )
 
     return parser
 
@@ -1096,6 +1174,11 @@ def main() -> None:
 
     if args.move_timeout_ms <= 0:
         message = f"--move-timeout-ms must be positive, got {args.move_timeout_ms}"
+        print(format_error_message(message), flush=True)
+        sys.exit(1)
+
+    if args.handshake_timeout_ms <= 0:
+        message = f"--handshake-timeout-ms must be positive, got {args.handshake_timeout_ms}"
         print(format_error_message(message), flush=True)
         sys.exit(1)
 
@@ -1138,6 +1221,7 @@ def main() -> None:
         test_id=args.test_id,
         time_margin_ms=args.time_margin_ms,
         move_timeout_ms=args.move_timeout_ms,
+        handshake_timeout_ms=args.handshake_timeout_ms,
     )
 
     # Start workers from a forkserver with the workers' module preloaded,

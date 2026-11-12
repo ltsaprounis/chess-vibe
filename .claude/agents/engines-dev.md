@@ -33,8 +33,11 @@ Scope and boundaries:
   infrastructure code (shared/backend/runner), and infrastructure
   never imports them. The infra drives the UCI surface
   uci/isready/position/go/quit, expects `bestmove` in long algebraic
-  notation, resends the full move list on every `position`, never
-  sends `ucinewgame`, and times out after 10s — engines must flush
+  notation, resends the full move list on every `position`, and never
+  sends `ucinewgame`. In SPRT games an engine has 30 s to answer each
+  of `uci` and `isready` (`--handshake-timeout-ms`), and a search has
+  its time control plus `--time-margin-ms` (`--move-timeout-ms` for
+  depth and nodes); the Play page allows 10 s. Engines must flush
   stdout after every line and never block.
 - Registry `run` commands are resolved relative to the engine `dir`
   and spawned without a cwd — they must work from any directory
