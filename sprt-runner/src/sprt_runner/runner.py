@@ -14,7 +14,10 @@ Message types:
     - ``error``: An error. Most concern one game or worker, and the run
       carries on. A fatal one is the run's last line, and the CLI then
       exits 1.
-    - ``complete``: Final SPRT result.
+    - ``complete``: The run's result: an SPRT decision, ``H0`` or ``H1``, or
+      at ``--max-games``, ``inconclusive`` without a decision or ``fixed``
+      with ``--no-early-stop``. It carries the tallies, the games per
+      termination, and an Elo estimate with its 95% interval.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import shlex
 import signal
 import sys
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,10 +52,11 @@ from sprt_runner.game import (
     DEFAULT_MOVE_TIMEOUT_MS,
     DEFAULT_TIME_MARGIN_MS,
     GameConfig,
+    TerminationReason,
     play_game,
 )
 from sprt_runner.openings import OpeningPair, load_openings, make_opening_pairs
-from sprt_runner.sprt import SPRTDecision, sprt_test
+from sprt_runner.sprt import SPRTDecision, estimate_elo, sprt_test
 from sprt_runner.worktree import (
     EngineSpec,
     cleanup_worktree,
@@ -110,6 +115,12 @@ class RunConfig:
             See :class:`~sprt_runner.game.GameConfig`.
         handshake_timeout_ms: Limit on each of an engine's answers to ``uci``
             and ``isready`` when a game starts, in milliseconds.
+        max_games: Number of scored games after which the run stops, or None
+            for no limit. A failed game or a dead worker isn't scored, so
+            another game takes its place.
+        early_stop: Whether an SPRT decision ends the run. Without it, the
+            run plays exactly ``max_games`` games, which must then be set:
+            :func:`run_sprt` refuses to start otherwise.
     """
 
     base: str
@@ -129,6 +140,8 @@ class RunConfig:
     time_margin_ms: int = DEFAULT_TIME_MARGIN_MS
     move_timeout_ms: int = DEFAULT_MOVE_TIMEOUT_MS
     handshake_timeout_ms: int = DEFAULT_HANDSHAKE_TIMEOUT_MS
+    max_games: int | None = None
+    early_stop: bool = True
 
 
 class RunAbortedError(Exception):
@@ -215,23 +228,55 @@ def format_progress_message(
     )
 
 
-def format_complete_message(result: str, total_games: int, llr: float) -> str:
-    """Format SPRT completion as a JSON-lines message.
+def format_complete_message(
+    result: str,
+    total_games: int,
+    llr: float,
+    *,
+    wins: int,
+    losses: int,
+    draws: int,
+    errors: int,
+    terminations: Mapping[str, int],
+) -> str:
+    """Format a run's result as a JSON-lines message.
+
+    The message adds an Elo estimate from ``wins``, ``losses`` and ``draws``:
+    ``elo``, with its 95% interval in ``elo_lower`` and ``elo_upper``. Each
+    is null where it would be infinite, and all three are null with no games.
 
     Args:
-        result: SPRT outcome ("H0" or "H1").
-        total_games: Total games played.
+        result: ``H0`` or ``H1`` for an SPRT decision. At the game limit,
+            ``inconclusive`` if SPRT hadn't decided, or ``fixed`` if early
+            stopping was off.
+        total_games: Total games scored.
         llr: Final log-likelihood ratio.
+        wins: Wins for the test engine.
+        losses: Losses for the test engine.
+        draws: Drawn games.
+        errors: Games that ended without a result: failed games, and games
+            whose worker died.
+        terminations: Scored games per way of ending, named as in
+            ``game_result`` messages.
 
     Returns:
         Single-line JSON string.
     """
+    estimate = estimate_elo(wins=wins, losses=losses, draws=draws)
     return json.dumps(
         {
             "type": "complete",
             "result": result,
             "total_games": total_games,
             "llr": llr,
+            "wins": wins,
+            "losses": losses,
+            "draws": draws,
+            "errors": errors,
+            "terminations": dict(terminations),
+            "elo": estimate.elo,
+            "elo_lower": estimate.lower,
+            "elo_upper": estimate.upper,
         }
     )
 
@@ -673,7 +718,9 @@ async def run_sprt(config: RunConfig) -> None:
     ``multiprocessing`` for game-level parallelism (with ``asyncio``
     inside each worker for UCI I/O), and streams JSON-lines progress
     to stdout. Workers report via ``multiprocessing.Queue``; the
-    coordinator aggregates single-threaded.
+    coordinator aggregates single-threaded. The run ends at an SPRT
+    decision, unless ``config.early_stop`` is off, or once
+    ``config.max_games`` games are scored.
 
     Worktrees created during engine resolution are cleaned up after the
     test completes (or fails), unless ``config.keep_worktrees`` is True.
@@ -685,12 +732,22 @@ async def run_sprt(config: RunConfig) -> None:
         config: Run configuration.
 
     Raises:
+        ValueError: If the game limits would never end the run:
+            ``config.max_games`` below 1, or ``config.early_stop`` off with no
+            ``config.max_games``. It's raised before anything starts.
         RunAbortedError: If the run stopped on a fatal error, such as a failed
             engine build, an unreadable opening book, a broken result queue,
             or a full round of worker deaths or of failed games. It's raised
             after the error is printed and after the workers and worktrees
             are cleaned up.
     """
+    # main() refuses these with an error line. A caller that builds its own
+    # config would otherwise get a run that never ends.
+    if config.max_games is not None and config.max_games < 1:
+        raise ValueError(f"max_games must be at least 1, got {config.max_games}")
+    if not config.early_stop and config.max_games is None:
+        raise ValueError("early_stop=False requires max_games")
+
     # Register SIGTERM → cancel-task handler so SIGTERM triggers the same
     # graceful shutdown path as SIGINT (KeyboardInterrupt → CancelledError).
     loop = asyncio.get_running_loop()
@@ -761,6 +818,9 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
     errors = 0
     games_played = 0
     pair_index = 0
+    # Scored games per way of ending. Every reason is listed, so a caller can
+    # read any of them from ``complete`` without a default.
+    terminations = {reason.value: 0 for reason in TerminationReason}
 
     base_label = f"base engine {config.base}"
     test_label = f"test engine {config.test}"
@@ -788,8 +848,12 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
 
     try:
         while True:
-            # Launch workers up to concurrency limit
-            while len(running) < config.concurrency:
+            # Launch workers up to the concurrency limit. Under a game limit,
+            # each game in flight may yet be scored, so it counts toward the
+            # limit until it fails or its worker dies.
+            while len(running) < config.concurrency and (
+                config.max_games is None or games_played + len(running) < config.max_games
+            ):
                 # Select opening
                 start_fen: str | None = None
                 swap_colors = False
@@ -935,6 +999,8 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
 
             games_played += 1
             consecutive_failures = 0
+            termination = worker_result.termination or "unknown"
+            terminations[termination] = terminations.get(termination, 0) + 1
 
             # Determine result from test engine's perspective
             if worker_result.swap_colors:
@@ -959,7 +1025,7 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                 format_game_result_message(
                     game_id=worker_result.game_id,
                     result=worker_result.result,
-                    termination=worker_result.termination or "unknown",
+                    termination=termination,
                     move_count=worker_result.move_count,
                 ),
                 flush=True,
@@ -1017,22 +1083,32 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                 flush=True,
             )
 
-            # Check stopping condition
-            if sprt_result.decision != SPRTDecision.CONTINUE:
+            # Check stopping condition. A decision on the last game allowed
+            # is still a decision.
+            if config.early_stop and sprt_result.decision != SPRTDecision.CONTINUE:
                 result_str = sprt_result.decision.value
-                print(
-                    format_complete_message(
-                        result=result_str,
-                        total_games=games_played,
-                        llr=sprt_result.llr,
-                    ),
-                    flush=True,
-                )
-                # Terminate remaining workers before breaking
-                _terminate_all_workers([*running.values(), *finished])
-                running.clear()
-                finished.clear()
-                break
+            elif config.max_games is not None and games_played >= config.max_games:
+                result_str = "inconclusive" if config.early_stop else "fixed"
+            else:
+                continue
+            print(
+                format_complete_message(
+                    result=result_str,
+                    total_games=games_played,
+                    llr=sprt_result.llr,
+                    wins=wins,
+                    losses=losses,
+                    draws=draws,
+                    errors=errors,
+                    terminations=terminations,
+                ),
+                flush=True,
+            )
+            # Terminate remaining workers before breaking
+            _terminate_all_workers([*running.values(), *finished])
+            running.clear()
+            finished.clear()
+            break
 
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("SPRT run interrupted — shutting down gracefully")
@@ -1145,6 +1221,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_HANDSHAKE_TIMEOUT_MS,
         help="Limit on each of an engine's answers to uci and isready as a game starts (ms)",
     )
+    run_parser.add_argument(
+        "--max-games",
+        type=int,
+        default=None,
+        help="Stop after this many scored games; with no SPRT decision by then, "
+        "the result is inconclusive",
+    )
+    run_parser.add_argument(
+        "--no-early-stop",
+        action="store_true",
+        default=False,
+        help="Play exactly --max-games games whatever the LLR; the result is fixed",
+    )
 
     return parser
 
@@ -1188,6 +1277,16 @@ def main() -> None:
         print(format_error_message(message), flush=True)
         sys.exit(1)
 
+    if args.max_games is not None and args.max_games < 1:
+        message = f"--max-games must be at least 1, got {args.max_games}"
+        print(format_error_message(message), flush=True)
+        sys.exit(1)
+
+    # A run that never stops early would never stop without a game limit.
+    if args.no_early_stop and args.max_games is None:
+        print(format_error_message("--no-early-stop requires --max-games"), flush=True)
+        sys.exit(1)
+
     # Unlike --book/--output-dir, an explicitly-supplied path is validated
     # up front: silently running for hours without the adjudication the user
     # asked for is worse than refusing to start.
@@ -1222,6 +1321,8 @@ def main() -> None:
         time_margin_ms=args.time_margin_ms,
         move_timeout_ms=args.move_timeout_ms,
         handshake_timeout_ms=args.handshake_timeout_ms,
+        max_games=args.max_games,
+        early_stop=not args.no_early_stop,
     )
 
     # Start workers from a forkserver with the workers' module preloaded,

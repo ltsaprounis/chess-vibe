@@ -6,6 +6,9 @@ hypothesis, the win/draw/loss probabilities are fitted by maximum
 likelihood subject to that hypothesis's expected score. It matches
 Fishtest's ``LLR_logistic`` when all three outcomes have occurred. Fishtest
 replaces zero counts with 1e-3 first, whereas this computes the exact fit.
+
+It also estimates the Elo difference with a 95% confidence interval, as
+cutechess-cli does.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import Enum
+from statistics import NormalDist
 
 
 class SPRTDecision(Enum):
@@ -38,6 +42,79 @@ class SPRTResult:
     lower_bound: float
     upper_bound: float
     decision: SPRTDecision
+
+
+@dataclass(frozen=True)
+class EloEstimate:
+    """An Elo difference estimated from game results, with its 95% confidence interval.
+
+    Each value is None where it would be infinite, at a score of 0% or 100%,
+    since JSON has no infinity. With no games, all three are None.
+
+    Attributes:
+        elo: Estimated Elo difference, positive when the tested engine scored
+            more than half the points.
+        lower: Lower end of the 95% interval.
+        upper: Upper end of the 95% interval.
+    """
+
+    elo: float | None
+    lower: float | None
+    upper: float | None
+
+
+# The normal quantile for a two-sided 95% interval, 1.959964. cutechess-cli
+# approximates it as 1.957162, so its intervals are about 0.14% narrower.
+_Z_95 = NormalDist().inv_cdf(0.975)
+
+
+def estimate_elo(wins: int, losses: int, draws: int) -> EloEstimate:
+    """Estimate the Elo difference from game results, with a 95% confidence interval.
+
+    This is cutechess-cli's estimate: the mean score, with a normal
+    approximation to its spread from the variance of the win, draw and loss
+    results, assuming independent games. Each end of the score's interval is
+    converted to Elo on its own, so the interval in Elo is asymmetric. When
+    every game has the same result there's no variance, so the interval has
+    no width.
+
+    Args:
+        wins: Number of wins for the tested engine.
+        losses: Number of losses for the tested engine.
+        draws: Number of drawn games.
+
+    Returns:
+        The estimate. With no games, every value is None.
+    """
+    games = wins + losses + draws
+    if games == 0:
+        return EloEstimate(elo=None, lower=None, upper=None)
+    score = (wins + draws / 2.0) / games
+    variance = (wins * (1.0 - score) ** 2 + losses * score**2 + draws * (0.5 - score) ** 2) / games
+    margin = _Z_95 * math.sqrt(variance / games)
+    return EloEstimate(
+        elo=_score_to_elo(score),
+        lower=_score_to_elo(score - margin),
+        upper=_score_to_elo(score + margin),
+    )
+
+
+def _score_to_elo(score: float) -> float | None:
+    """Convert an expected score to an Elo difference, the inverse of ``elo_to_score``.
+
+    Written as the log of ``score / (1 - score)``, an even score gives 0.0
+    rather than -0.0.
+
+    Args:
+        score: Expected score of the tested engine.
+
+    Returns:
+        The Elo difference, or None for a score outside (0, 1), where it
+        would be infinite.
+    """
+    if not 0.0 < score < 1.0:
+        return None
+    return 400.0 * math.log10(score / (1.0 - score))
 
 
 def elo_to_score(elo: float) -> float:

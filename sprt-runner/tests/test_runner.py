@@ -159,6 +159,18 @@ class TestRunConfig:
         )
         assert config.concurrency == 4
 
+    def test_runs_have_no_game_limit_by_default(self) -> None:
+        """Without a limit, a run plays until SPRT decides, as before #189."""
+        config = RunConfig(
+            base="random-engine",
+            test="test-engine",
+            time_control=FixedTimeControl(movetime_ms=100),
+            elo0=0.0,
+            elo1=5.0,
+        )
+        assert config.max_games is None
+        assert config.early_stop is True
+
 
 class TestJSONLineFormatters:
     """Tests for JSON-lines output formatting."""
@@ -195,15 +207,54 @@ class TestJSONLineFormatters:
         assert parsed["llr"] == 1.5
 
     def test_complete_message(self) -> None:
+        """``complete`` carries the tallies and an Elo estimate from them (#189).
+
+        30 wins, 10 losses and 60 draws are worth +70.4 Elo, between +28.7 and +114.3.
+        """
         msg = format_complete_message(
             result="H1",
             total_games=100,
             llr=3.5,
+            wins=30,
+            losses=10,
+            draws=60,
+            errors=2,
+            terminations={"checkmate": 25, "adjudication": 75},
         )
         parsed = json.loads(msg)
-        assert parsed["type"] == "complete"
-        assert parsed["result"] == "H1"
-        assert parsed["total_games"] == 100
+        assert parsed == {
+            "type": "complete",
+            "result": "H1",
+            "total_games": 100,
+            "llr": 3.5,
+            "wins": 30,
+            "losses": 10,
+            "draws": 60,
+            "errors": 2,
+            "terminations": {"checkmate": 25, "adjudication": 75},
+            "elo": pytest.approx(70.43650362227247, rel=1e-9),  # type: ignore[reportUnknownMemberType]
+            "elo_lower": pytest.approx(28.694507394308168, rel=1e-9),  # type: ignore[reportUnknownMemberType]
+            "elo_upper": pytest.approx(114.29699219108149, rel=1e-9),  # type: ignore[reportUnknownMemberType]
+        }
+
+    def test_complete_message_reports_an_infinite_elo_as_null(self) -> None:
+        """Three wins and nothing else are infinitely many Elo, which JSON can only say as null."""
+        msg = format_complete_message(
+            result="H1",
+            total_games=3,
+            llr=3.0,
+            wins=3,
+            losses=0,
+            draws=0,
+            errors=0,
+            terminations={"checkmate": 3},
+        )
+        parsed = json.loads(msg)
+        assert {key: parsed.get(key, "missing") for key in ("elo", "elo_lower", "elo_upper")} == {
+            "elo": None,
+            "elo_lower": None,
+            "elo_upper": None,
+        }
 
     def test_error_message(self) -> None:
         msg = format_error_message("Engine crashed unexpectedly")
@@ -216,7 +267,16 @@ class TestJSONLineFormatters:
         messages = [
             format_game_result_message("g1", GameResult.DRAW, "stalemate", 50),
             format_progress_message(0, 0, 0, 0.0, -3.0, 3.0, 0),
-            format_complete_message("H0", 200, -3.5),
+            format_complete_message(
+                "H0",
+                200,
+                -3.5,
+                wins=50,
+                losses=60,
+                draws=90,
+                errors=0,
+                terminations={"checkmate": 110, "draw_rule": 90},
+            ),
             format_error_message("test error"),
         ]
         for msg in messages:
@@ -2495,12 +2555,17 @@ class _ScriptedFakeProcess:
 
     "Exits" means ``is_alive()`` turns False. ``join`` records a join once
     the worker has exited.
+
+    A delivered game is a White win by checkmate, unless ``reset`` gives
+    ``outcomes``: then each worker's game has the result and termination at
+    its creation index, cycling through the list.
     """
 
     script: ClassVar[list[str]] = []
     default: ClassVar[str] = "deliver"
     queue_error: ClassVar[type[Exception]] = OSError
     error: ClassVar[str] = "engine failed to start"
+    outcomes: ClassVar[list[tuple[GameResult, str | None]]] = []
     instances: ClassVar[list[_ScriptedFakeProcess]] = []
     next_pid: ClassVar[int] = 19000
 
@@ -2529,11 +2594,13 @@ class _ScriptedFakeProcess:
         default: str = "deliver",
         queue_error: type[Exception] = OSError,
         error: str = "engine failed to start",
+        outcomes: list[tuple[GameResult, str | None]] | None = None,
     ) -> None:
         cls.script = script
         cls.default = default
         cls.queue_error = queue_error
         cls.error = error
+        cls.outcomes = outcomes if outcomes is not None else []
         cls.instances = []
 
     @property
@@ -2541,16 +2608,26 @@ class _ScriptedFakeProcess:
         return self._pid
 
     def _result(self) -> WorkerResult:
-        """This worker's result: a failed game for the ``error`` behaviours, else a win."""
-        if not self.behaviour.startswith("error"):
+        """This worker's result: a failed game for the ``error`` behaviours, else a finished one."""
+        if self.behaviour.startswith("error"):
+            return WorkerResult(
+                game_id=self.task.game_id,
+                result=None,
+                termination=None,
+                move_count=0,
+                swap_colors=self.task.swap_colors,
+                error=_ScriptedFakeProcess.error.replace("{index}", str(self.index)),
+            )
+        outcomes = _ScriptedFakeProcess.outcomes
+        if not outcomes:
             return _white_win(self.task)
+        result, termination = outcomes[self.index % len(outcomes)]
         return WorkerResult(
             game_id=self.task.game_id,
-            result=None,
-            termination=None,
-            move_count=0,
+            result=result,
+            termination=termination,
+            move_count=20,
             swap_colors=self.task.swap_colors,
-            error=_ScriptedFakeProcess.error.replace("{index}", str(self.index)),
         )
 
     def start(self) -> None:
@@ -2742,6 +2819,582 @@ class TestCoordinatorSlots:
         assert len(_ExitingFakeProcess.instances) > 4
         assert max(_ExitingFakeProcess.unreaped_at_launch) == 0
         assert all(p.joined for p in _ExitingFakeProcess.instances)
+
+
+_NO_TERMINATIONS = {reason.value: 0 for reason in TerminationReason}
+
+
+class TestGameLimits:
+    """``max_games`` ends a run at N scored games, and ``early_stop=False`` plays all N (#189).
+
+    N counts scored games. A failed game or a dead worker frees its slot, and
+    another game takes its place. A decision before N still ends the run
+    unless ``early_stop`` is off. Otherwise ``complete`` says ``inconclusive``,
+    or ``fixed`` without early stopping, and whatever the result it carries
+    the run's tallies.
+
+    ``_quick_config``'s alternating losses and wins accept H0 at game 17.
+    """
+
+    @staticmethod
+    def _config(concurrency: int, max_games: int, *, early_stop: bool = True) -> RunConfig:
+        config = _quick_config(concurrency)
+        config.max_games = max_games
+        config.early_stop = early_stop
+        return config
+
+    @staticmethod
+    def _messages(capsys: pytest.CaptureFixture[str]) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+
+    @staticmethod
+    def _of_type(messages: list[dict[str, Any]], message_type: str) -> list[dict[str, Any]]:
+        return [m for m in messages if m["type"] == message_type]
+
+    @pytest.mark.asyncio
+    async def test_a_run_with_no_decision_by_the_limit_is_inconclusive(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Five games come before the decision at game 17, so the run stops at five."""
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(self._config(concurrency=1, max_games=5), 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        assert len(self._of_type(messages, "game_result")) == 5
+        assert self._of_type(messages, "complete") == [messages[-1]]
+        assert (messages[-1]["result"], messages[-1]["total_games"]) == ("inconclusive", 5)
+        assert len(_ScriptedFakeProcess.instances) == 5
+
+    @pytest.mark.asyncio
+    async def test_no_game_launches_once_n_are_scored_or_in_flight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """At three workers and a limit of four, the fourth game is the last to launch.
+
+        Every worker is terminated when the run ends.
+        """
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(self._config(concurrency=3, max_games=4), 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        assert len(_ScriptedFakeProcess.instances) == 4
+        assert len(self._of_type(messages, "game_result")) == 4
+        assert (messages[-1]["result"], messages[-1]["total_games"]) == ("inconclusive", 4)
+        assert not any(worker.is_alive() for worker in _ScriptedFakeProcess.instances)
+
+    @pytest.mark.asyncio
+    async def test_a_game_still_playing_at_the_limit_is_waited_for(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The second of two games ends after the first, and its result still counts.
+
+        No third game launches while it plays, since the limit is two.
+        """
+        _ScriptedFakeProcess.reset(["deliver", "deliver_on_second_check"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
+
+        await _run_within(self._config(concurrency=2, max_games=2), 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        launched = [worker.task.game_id for worker in _ScriptedFakeProcess.instances]
+        assert [m["game_id"] for m in self._of_type(messages, "game_result")] == launched
+        assert len(launched) == 2
+        assert (messages[-1]["result"], messages[-1]["total_games"]) == ("inconclusive", 2)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("early_stop", "result"),
+        [(True, "inconclusive"), (False, "fixed")],
+        ids=["limit", "fixed_length"],
+    )
+    async def test_failed_games_are_replaced_and_dont_count(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        early_stop: bool,
+        result: str,
+    ) -> None:
+        """At two workers and a limit of three, the first game fails, so four games launch.
+
+        The three scored games are a win, a loss and a win for the test
+        engine, which plays White in the second and fourth. The failed game
+        is in ``errors`` alone, not in the results or the terminations.
+        """
+        _ScriptedFakeProcess.reset(["error"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        config = self._config(concurrency=2, max_games=3, early_stop=early_stop)
+
+        await _run_within(config, 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        assert len(_ScriptedFakeProcess.instances) == 4
+        assert len(self._of_type(messages, "game_result")) == 3
+        assert messages[-1] == {
+            "type": "complete",
+            "result": result,
+            "total_games": 3,
+            "llr": self._of_type(messages, "progress")[-1]["llr"],
+            "wins": 2,
+            "losses": 1,
+            "draws": 0,
+            "errors": 1,
+            "terminations": {**_NO_TERMINATIONS, "checkmate": 3},
+            "elo": pytest.approx(120.41199826559247, rel=1e-9),  # type: ignore[reportUnknownMemberType]
+            "elo_lower": pytest.approx(-325.31767471105275, rel=1e-9),  # type: ignore[reportUnknownMemberType]
+            "elo_upper": None,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("early_stop", "result"),
+        [(True, "inconclusive"), (False, "fixed")],
+        ids=["limit", "fixed_length"],
+    )
+    async def test_dead_workers_are_replaced_and_dont_count(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        early_stop: bool,
+        result: str,
+    ) -> None:
+        """At two workers and a limit of two, the first worker dies, so three games launch.
+
+        The two scored games are a win and a loss for the test engine. The
+        death is in ``errors`` alone, not in the results or the terminations.
+        """
+        _ScriptedFakeProcess.reset(["die"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        config = self._config(concurrency=2, max_games=2, early_stop=early_stop)
+
+        await _run_within(config, 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        errors = [str(m["message"]) for m in self._of_type(messages, "error")]
+        assert len([e for e in errors if "died unexpectedly" in e]) == len(errors) == 1
+        assert len(_ScriptedFakeProcess.instances) == 3
+        assert len(self._of_type(messages, "game_result")) == 2
+        assert messages[-1] == {
+            "type": "complete",
+            "result": result,
+            "total_games": 2,
+            "llr": self._of_type(messages, "progress")[-1]["llr"],
+            "wins": 1,
+            "losses": 1,
+            "draws": 0,
+            "errors": 1,
+            "terminations": {**_NO_TERMINATIONS, "checkmate": 2},
+            "elo": 0.0,
+            "elo_lower": None,
+            "elo_upper": None,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("early_stop", [True, False], ids=["limit", "fixed_length"])
+    async def test_a_limited_run_still_stops_when_every_game_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        early_stop: bool,
+    ) -> None:
+        """Failed games are replaced, so #197's limit ends a run whose engine can't start."""
+        _ScriptedFakeProcess.reset([], default="error")
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        config = self._config(concurrency=3, max_games=5, early_stop=early_stop)
+
+        messages = await _run_to_fatal_stop(config, 3.0, monkeypatch, capsys)
+
+        assert messages[-1]["message"] == (
+            "Aborting after 3 failed games in a row; the last: engine failed to start"
+        )
+        assert [m for m in messages if m["type"] in ("game_result", "complete")] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("early_stop", [True, False], ids=["limit", "fixed_length"])
+    async def test_a_limited_run_still_stops_when_every_worker_dies(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        early_stop: bool,
+    ) -> None:
+        """Dead workers are replaced too, so #205's limit is what ends a run whose workers die."""
+        _ScriptedFakeProcess.reset([], default="die")
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
+        config = self._config(concurrency=3, max_games=5, early_stop=early_stop)
+
+        messages = await _run_to_fatal_stop(config, 3.0, monkeypatch, capsys)
+
+        assert messages[-1]["message"] == "Aborting after 3 worker deaths in a row with no result"
+        assert [m for m in messages if m["type"] in ("game_result", "complete")] == []
+
+    @pytest.mark.asyncio
+    async def test_a_limit_below_the_concurrency_launches_only_that_many(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """At three workers and a limit of one, one game launches, rather than three cut short."""
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(self._config(concurrency=3, max_games=1), 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        assert len(_ScriptedFakeProcess.instances) == 1
+        assert len(self._of_type(messages, "game_result")) == 1
+        assert (messages[-1]["result"], messages[-1]["total_games"]) == ("inconclusive", 1)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("behaviour", "fatal"),
+        [
+            ("error", "Aborting after 3 failed games in a row; the last: engine failed to start"),
+            ("die", "Aborting after 3 worker deaths in a row with no result"),
+        ],
+        ids=["failed_games", "dead_workers"],
+    )
+    async def test_a_limit_below_the_concurrency_still_stops_after_a_full_round(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        behaviour: str,
+        fatal: str,
+    ) -> None:
+        """At three workers and a limit of one, games launch one at a time.
+
+        Every one fails or its worker dies, and the third in a row stops the run.
+        """
+        _ScriptedFakeProcess.reset([], default=behaviour)
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
+        config = self._config(concurrency=3, max_games=1)
+
+        messages = await _run_to_fatal_stop(config, 3.0, monkeypatch, capsys)
+
+        assert messages[-1]["message"] == fatal
+        assert len(_ScriptedFakeProcess.instances) == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("first", ["error", "die"], ids=["failed_game", "dead_worker"])
+    async def test_a_limit_below_the_concurrency_doesnt_shrink_the_round(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        first: str,
+    ) -> None:
+        """At three workers, it takes three failures in a row to stop a run, even at a limit of one.
+
+        Here the first game fails or its worker dies, and the replacement is
+        scored: a win for the test engine, which plays White.
+        """
+        _ScriptedFakeProcess.reset([first])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        monkeypatch.setattr(_QUEUE_TIMEOUT_SECONDS, 0.05)
+
+        await _run_within(self._config(concurrency=3, max_games=1), 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        assert len(_ScriptedFakeProcess.instances) == 2
+        assert messages[-1] == {
+            "type": "complete",
+            "result": "inconclusive",
+            "total_games": 1,
+            "llr": self._of_type(messages, "progress")[-1]["llr"],
+            "wins": 1,
+            "losses": 0,
+            "draws": 0,
+            "errors": 1,
+            "terminations": {**_NO_TERMINATIONS, "checkmate": 1},
+            "elo": None,
+            "elo_lower": None,
+            "elo_upper": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_game_with_no_termination_is_counted_as_unknown(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A scored result always has a termination, but one without would still be counted.
+
+        Its ``game_result`` says ``unknown``, and so do the terminations, which
+        then still add up to the games scored.
+        """
+        _ScriptedFakeProcess.reset([], outcomes=[(GameResult.DRAW, None)])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(self._config(concurrency=1, max_games=1), 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        assert [m["termination"] for m in self._of_type(messages, "game_result")] == ["unknown"]
+        assert messages[-1]["terminations"] == {**_NO_TERMINATIONS, "unknown": 1}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("max_games", "early_stop", "expected"),
+        [
+            (0, True, "max_games must be at least 1, got 0"),
+            (-3, True, "max_games must be at least 1, got -3"),
+            (0, False, "max_games must be at least 1, got 0"),
+            (None, False, "early_stop=False requires max_games"),
+        ],
+        ids=[
+            "zero_games",
+            "negative_games",
+            "zero_games_without_early_stop",
+            "no_early_stop_without_a_limit",
+        ],
+    )
+    async def test_a_limit_that_cannot_end_the_run_is_refused(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        max_games: int | None,
+        early_stop: bool,
+        expected: str,
+    ) -> None:
+        """Either would make the run go on forever, so it doesn't start.
+
+        main() refuses these with an ``error`` line. A caller of ``run_sprt``
+        gets a ``ValueError`` before anything launches or prints.
+        """
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        config = _quick_config(concurrency=2)
+        config.max_games = max_games
+        config.early_stop = early_stop
+
+        with pytest.raises(ValueError, match=re.escape(expected)):
+            await _run_within(config, 3.0, monkeypatch)
+
+        assert _ScriptedFakeProcess.instances == []
+        assert capsys.readouterr().out == ""
+
+    @pytest.mark.asyncio
+    async def test_a_refused_run_leaves_nothing_behind(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The refusal comes before anything else ``run_sprt`` does.
+
+        So no SIGTERM handler is left on the caller's loop, no engine is
+        resolved or built, and no worktree is removed for the commit specs.
+        """
+        resolved: list[object] = []
+        removed: list[Path] = []
+
+        async def _resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
+            resolved.append(spec)
+            return "engine_cmd", Path("/fake/dir")
+
+        async def _cleanup(worktree_path: Path, *, repo_root: Path) -> None:
+            removed.append(worktree_path)
+
+        _ScriptedFakeProcess.reset([])
+        monkeypatch.setattr("sprt_runner.runner.multiprocessing.Process", _ScriptedFakeProcess)
+        monkeypatch.setattr("sprt_runner.runner.resolve_engine_path", _resolve)
+        monkeypatch.setattr("sprt_runner.runner.cleanup_worktree", _cleanup)
+        config = _quick_config(concurrency=1)
+        config.base, config.test = "lab:abc1234", "lab:def5678"
+        config.early_stop = False
+
+        with pytest.raises(ValueError, match="early_stop=False requires max_games"):
+            await asyncio.wait_for(run_sprt(config), timeout=3.0)
+
+        assert asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM) is False
+        assert (resolved, removed, _ScriptedFakeProcess.instances) == ([], [], [])
+
+    @pytest.mark.asyncio
+    async def test_without_early_stop_the_run_plays_on_past_a_decision(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The LLR passes the H0 bound at game 17, and the run plays on to its 25th.
+
+        Every worker is terminated when the run ends, as at any other end.
+        """
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(
+            self._config(concurrency=2, max_games=25, early_stop=False), 5.0, monkeypatch
+        )
+
+        messages = self._messages(capsys)
+        progress = self._of_type(messages, "progress")
+        assert len(progress) == 25
+        assert progress[16]["llr"] <= progress[16]["lower_bound"]
+        assert self._of_type(messages, "complete") == [messages[-1]]
+        assert (messages[-1]["result"], messages[-1]["total_games"]) == ("fixed", 25)
+        assert len(_ScriptedFakeProcess.instances) == 25
+        assert not any(worker.is_alive() for worker in _ScriptedFakeProcess.instances)
+
+    @pytest.mark.asyncio
+    async def test_without_early_stop_the_run_plays_on_past_h1_too(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The test engine wins every game, which accepts H1 at game 8, and all 10 are played.
+
+        It has Black in the first game and White in the next, alternately, so
+        the winning colour alternates with it.
+        """
+        _ScriptedFakeProcess.reset(
+            [],
+            outcomes=[(GameResult.BLACK_WIN, "checkmate"), (GameResult.WHITE_WIN, "checkmate")],
+        )
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(
+            self._config(concurrency=2, max_games=10, early_stop=False), 5.0, monkeypatch
+        )
+
+        messages = self._messages(capsys)
+        progress = self._of_type(messages, "progress")
+        assert progress[7]["llr"] >= progress[7]["upper_bound"]
+        complete = messages[-1]
+        assert (complete["result"], complete["total_games"], complete["wins"]) == ("fixed", 10, 10)
+
+    @pytest.mark.asyncio
+    async def test_a_decision_before_the_limit_still_ends_the_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(self._config(concurrency=1, max_games=25), 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        assert (messages[-1]["result"], messages[-1]["total_games"]) == ("H0", 17)
+
+    @pytest.mark.asyncio
+    async def test_a_decision_on_the_last_game_is_the_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A run limited to 17 games accepts H0 on its last one, which beats inconclusive."""
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(self._config(concurrency=1, max_games=17), 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        assert (messages[-1]["result"], messages[-1]["total_games"]) == ("H0", 17)
+
+    @pytest.mark.asyncio
+    async def test_complete_counts_the_results_and_every_termination(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Six games give the test engine a win, a win, a draw, a loss, a win and a draw.
+
+        At one worker the test engine has Black in the first game and White in
+        the next, alternately. Terminations that never happened are counted as 0.
+        """
+        _ScriptedFakeProcess.reset(
+            [],
+            outcomes=[
+                (GameResult.BLACK_WIN, "checkmate"),
+                (GameResult.WHITE_WIN, "timeout"),
+                (GameResult.DRAW, "draw_rule"),
+                (GameResult.BLACK_WIN, "adjudication"),
+                (GameResult.BLACK_WIN, "checkmate"),
+                (GameResult.DRAW, "max_moves"),
+            ],
+        )
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(
+            self._config(concurrency=1, max_games=6, early_stop=False), 5.0, monkeypatch
+        )
+
+        messages = self._messages(capsys)
+        assert messages[-1] == {
+            "type": "complete",
+            "result": "fixed",
+            "total_games": 6,
+            "llr": self._of_type(messages, "progress")[-1]["llr"],
+            "wins": 3,
+            "losses": 1,
+            "draws": 2,
+            "errors": 0,
+            "terminations": {
+                **_NO_TERMINATIONS,
+                "checkmate": 2,
+                "timeout": 1,
+                "draw_rule": 1,
+                "adjudication": 1,
+                "max_moves": 1,
+            },
+            "elo": pytest.approx(120.41199826559247, rel=1e-9),  # type: ignore[reportUnknownMemberType]
+            "elo_lower": pytest.approx(-93.59850043701118, rel=1e-9),  # type: ignore[reportUnknownMemberType]
+            "elo_upper": pytest.approx(575.4941770005972, rel=1e-9),  # type: ignore[reportUnknownMemberType]
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_decided_run_reports_its_tallies_too(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A run with no limit still ends at its decision, and its ``complete`` counts its games.
+
+        Its first game fails, which ``errors`` counts. Then, alternating
+        colours, the test engine wins six games and draws two, which accepts
+        H1. Six wins and two draws score 87.5%, which is 400 * log10(7) Elo,
+        and the interval's upper end is past 100%.
+        """
+        _ScriptedFakeProcess.reset(
+            ["error"],
+            outcomes=[
+                (GameResult.BLACK_WIN, "checkmate"),
+                (GameResult.WHITE_WIN, "adjudication"),
+                (GameResult.DRAW, "draw_rule"),
+                (GameResult.WHITE_WIN, "checkmate"),
+            ],
+        )
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=2), 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        assert messages[-1] == {
+            "type": "complete",
+            "result": "H1",
+            "total_games": 8,
+            "llr": self._of_type(messages, "progress")[-1]["llr"],
+            "wins": 6,
+            "losses": 0,
+            "draws": 2,
+            "errors": 1,
+            "terminations": {
+                **_NO_TERMINATIONS,
+                "checkmate": 4,
+                "adjudication": 2,
+                "draw_rule": 2,
+            },
+            "elo": pytest.approx(338.0392160057027, rel=1e-9),  # type: ignore[reportUnknownMemberType]
+            "elo_lower": pytest.approx(168.37730232002275, rel=1e-9),  # type: ignore[reportUnknownMemberType]
+            "elo_upper": None,
+        }
 
 
 class TestRunConfigKeepWorktrees:
@@ -3036,6 +3689,93 @@ class TestMainTimeLimitWiring:
     def test_smallest_handshake_timeout_is_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
         config = self._run_main(monkeypatch, "--handshake-timeout-ms", "1")
         assert config.handshake_timeout_ms == 1
+
+
+class TestGameLimitFlagsCLI:
+    """Parser-level tests for --max-games and --no-early-stop (#189)."""
+
+    def test_defaults(self) -> None:
+        args = build_parser().parse_args(_RUN_ARGV)
+        assert args.max_games is None
+        assert args.no_early_stop is False
+
+    def test_explicit_values(self) -> None:
+        args = build_parser().parse_args([*_RUN_ARGV, "--max-games", "1000", "--no-early-stop"])
+        assert args.max_games == 1000
+        assert args.no_early_stop is True
+
+
+class TestMainGameLimits:
+    """main() hands the game limits to RunConfig, and refuses ones that can't work (#189).
+
+    A run that never stops early needs a limit, or it would never stop.
+    """
+
+    @staticmethod
+    def _run_main(monkeypatch: pytest.MonkeyPatch, *extra_args: str) -> RunConfig:
+        """Run main() with the given extra flags and return the resulting RunConfig."""
+        captured: dict[str, RunConfig] = {}
+
+        async def _fake_run_sprt(config: RunConfig) -> None:
+            captured["config"] = config
+
+        monkeypatch.setattr("sprt_runner.runner.run_sprt", _fake_run_sprt)
+        monkeypatch.setattr("sys.argv", ["sprt_runner", *_RUN_ARGV, *extra_args])
+
+        main()
+
+        return captured["config"]
+
+    def test_no_limit_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._run_main(monkeypatch)
+        assert (config.max_games, config.early_stop) == (None, True)
+
+    def test_a_limit_reaches_run_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._run_main(monkeypatch, "--max-games", "1000")
+        assert (config.max_games, config.early_stop) == (1000, True)
+
+    def test_no_early_stop_reaches_run_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._run_main(monkeypatch, "--max-games", "1", "--no-early-stop")
+        assert (config.max_games, config.early_stop) == (1, False)
+
+    def test_a_limit_below_the_concurrency_is_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The run then launches only as many games as the limit allows."""
+        config = self._run_main(monkeypatch, "--max-games", "1", "--concurrency", "4")
+        assert (config.max_games, config.concurrency) == (1, 4)
+
+    @pytest.mark.parametrize(
+        ("extra_args", "expected"),
+        [
+            (["--max-games", "0"], "--max-games must be at least 1, got 0"),
+            (["--max-games", "-1"], "--max-games must be at least 1, got -1"),
+            (["--max-games", "0", "--no-early-stop"], "--max-games must be at least 1, got 0"),
+            (["--no-early-stop"], "--no-early-stop requires --max-games"),
+        ],
+        ids=[
+            "zero_games",
+            "negative_games",
+            "zero_games_without_early_stop",
+            "no_early_stop_without_a_limit",
+        ],
+    )
+    def test_a_limit_that_cannot_work_exits_1_with_an_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        extra_args: list[str],
+        expected: str,
+    ) -> None:
+        async def _fail_if_called(config: RunConfig) -> None:
+            raise AssertionError("run_sprt must not be reached when validation fails")
+
+        monkeypatch.setattr("sprt_runner.runner.run_sprt", _fail_if_called)
+        monkeypatch.setattr("sys.argv", ["sprt_runner", *_RUN_ARGV, *extra_args])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        assert capsys.readouterr().out.splitlines() == [format_error_message(expected)]
 
 
 class TestMainStartMethod:

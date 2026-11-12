@@ -6,9 +6,11 @@ import math
 
 import pytest
 from sprt_runner.sprt import (
+    EloEstimate,
     SPRTDecision,
     calculate_llr,
     elo_to_score,
+    estimate_elo,
     sprt_bounds,
     sprt_test,
 )
@@ -330,3 +332,119 @@ class TestDrawRateFittedPerHypothesis:
             assert one_win.decision != SPRTDecision.H1, draws
             if one_win.decision == SPRTDecision.H0:
                 assert all_draws.decision == SPRTDecision.H0, draws
+
+
+def _ends(estimate: EloEstimate) -> tuple[float, float, float]:
+    """Return an estimate's Elo and both ends of its interval, all of which must be finite."""
+    assert estimate.elo is not None
+    assert estimate.lower is not None
+    assert estimate.upper is not None
+    return estimate.elo, estimate.lower, estimate.upper
+
+
+class TestEstimateElo:
+    """Tests for the Elo estimate and its 95% interval (#189).
+
+    The formula is cutechess-cli's: a normal approximation to the mean score,
+    with the variance of the win, draw and loss results, and each end of the
+    score's interval converted to Elo separately. The quantile is the exact
+    1.959964, where cutechess-cli approximates it as 1.957162.
+    """
+
+    @pytest.mark.parametrize(
+        ("wins", "losses", "draws", "printed_elo", "printed_margin"),
+        [(364, 346, 218, 6.7, 19.5), (1024, 907, 483, 16.9, 12.4)],
+    )
+    def test_matches_published_cutechess_results(
+        self, wins: int, losses: int, draws: int, printed_elo: float, printed_margin: float
+    ) -> None:
+        """Two cutechess-cli results posted to TalkChess (viewtopic.php?p=968337).
+
+        cutechess-cli prints the Elo and the interval's half-width to one
+        decimal. Its approximate quantile makes the interval about 0.14%
+        narrower than the exact one, so the half-width here is within 0.1 of
+        the printed value rather than rounding to it.
+        """
+        elo, lower, upper = _ends(estimate_elo(wins=wins, losses=losses, draws=draws))
+
+        assert round(elo, 1) == printed_elo
+        assert abs((upper - lower) / 2 - printed_margin) < 0.1
+
+    @pytest.mark.parametrize(
+        ("wins", "losses", "draws", "expected"),
+        [
+            (10, 20, 70, (-34.86007028756008, -72.4464803812395, 1.9273459720050345)),
+            (30, 10, 60, (70.43650362227247, 28.694507394308168, 114.29699219108149)),
+            (3, 1, 2, (120.41199826559247, -93.59850043701118, 575.4941770005972)),
+        ],
+    )
+    def test_known_values(
+        self, wins: int, losses: int, draws: int, expected: tuple[float, float, float]
+    ) -> None:
+        """Values computed outside the runner, once with exact fractions and natural logs.
+
+        The interval is asymmetric: each end is converted from the score on its own.
+        """
+        estimate = estimate_elo(wins=wins, losses=losses, draws=draws)
+
+        assert _ends(estimate) == pytest.approx(expected, rel=1e-9)  # type: ignore[reportUnknownMemberType]
+
+    def test_an_even_score_is_zero_with_a_symmetric_interval(self) -> None:
+        """Zero is positive zero, so a ``complete`` line says ``0.0`` rather than ``-0.0``."""
+        elo, lower, upper = _ends(estimate_elo(wins=7, losses=7, draws=0))
+
+        assert elo == 0.0
+        assert math.copysign(1.0, elo) == 1.0
+        assert (lower, upper) == pytest.approx((-202.0661607532236, 202.0661607532236), rel=1e-9)  # type: ignore[reportUnknownMemberType]
+
+    @pytest.mark.parametrize(
+        ("wins", "losses", "draws", "expected"),
+        [
+            (5, 0, 1, (416.55707406329, 207.52755349762091, None)),
+            (0, 5, 1, (-416.55707406329003, None, -207.52755349762086)),
+            (3, 1, 0, (190.84850188786498, -126.44947981473729, None)),
+        ],
+    )
+    def test_an_end_past_a_0_or_100_percent_score_is_none(
+        self, wins: int, losses: int, draws: int, expected: tuple[float | None, ...]
+    ) -> None:
+        """An end of the score's interval at or past 0 or 1 would be infinite in Elo.
+
+        3-1-0 scores 75%, which is exactly 400 * log10(3) Elo.
+        """
+        estimate = estimate_elo(wins=wins, losses=losses, draws=draws)
+
+        actual = (estimate.elo, estimate.lower, estimate.upper)
+        assert actual == pytest.approx(expected, rel=1e-9)  # type: ignore[reportUnknownMemberType]
+
+    @pytest.mark.parametrize(
+        ("wins", "losses", "draws"),
+        [(10, 0, 0), (1, 0, 0), (0, 10, 0), (0, 1, 0), (0, 0, 0)],
+        ids=["all_wins", "one_win", "all_losses", "one_loss", "no_games"],
+    )
+    def test_no_estimate_at_a_0_or_100_percent_score_or_without_games(
+        self, wins: int, losses: int, draws: int
+    ) -> None:
+        """All wins or all losses are infinite in Elo, at both ends too. No games, no estimate."""
+        assert estimate_elo(wins=wins, losses=losses, draws=draws) == EloEstimate(
+            elo=None, lower=None, upper=None
+        )
+
+    def test_all_draws_have_an_interval_of_no_width(self) -> None:
+        """Results that are all alike have no variance, the normal approximation's blind spot."""
+        assert estimate_elo(wins=0, losses=0, draws=8) == EloEstimate(elo=0.0, lower=0.0, upper=0.0)
+
+    def test_swapping_wins_and_losses_mirrors_the_estimate(self) -> None:
+        elo, lower, upper = _ends(estimate_elo(wins=30, losses=10, draws=60))
+
+        mirrored = _ends(estimate_elo(wins=10, losses=30, draws=60))
+
+        assert mirrored == pytest.approx((-elo, -upper, -lower), rel=1e-12)  # type: ignore[reportUnknownMemberType]
+
+    def test_more_games_at_the_same_score_narrow_the_interval(self) -> None:
+        elo, lower, upper = _ends(estimate_elo(wins=10, losses=20, draws=70))
+
+        more_elo, more_lower, more_upper = _ends(estimate_elo(wins=100, losses=200, draws=700))
+
+        assert more_elo == pytest.approx(elo, rel=1e-12)  # type: ignore[reportUnknownMemberType]
+        assert lower < more_lower < more_elo < more_upper < upper
