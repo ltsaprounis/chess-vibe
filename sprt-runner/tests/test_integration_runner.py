@@ -909,3 +909,64 @@ class TestSlowStartWithinTheDefaultLimit:
         assert result.error is None
         assert result.result == GameResult.DRAW
         assert result.termination == TerminationReason.MAX_MOVES.value
+
+
+class TestGameLimitsThroughTheCLI:
+    """``--max-games`` and ``--no-early-stop`` through the real CLI (#189).
+
+    Both sides run the same deterministic scripted engine, so every game is
+    the same draw, and at bounds of [0, 200] the fifth draw accepts H0.
+    """
+
+    @staticmethod
+    def _run(root: Path, *limit_args: str) -> tuple[int, list[dict[str, object]]]:
+        """Play fast-engine against itself at two workers, with the given limit flags."""
+        return _run_cli(
+            root,
+            120,
+            *("--base", "fast-engine", "--test", "fast-engine", "--tc", "depth=1"),
+            *("--elo0", "0", "--elo1", "200", "--concurrency", "2", *limit_args),
+        )
+
+    def test_a_run_with_no_decision_by_the_limit_is_inconclusive(
+        self, scripted_repo_root: Path
+    ) -> None:
+        code, messages = self._run(scripted_repo_root, "--max-games", "3")
+
+        assert code == 0
+        assert [m for m in messages if m["type"] == "error"] == []
+        assert len([m for m in messages if m["type"] == "game_result"]) == 3
+        complete = messages[-1]
+        assert (complete["type"], complete["result"], complete["total_games"]) == (
+            "complete",
+            "inconclusive",
+            3,
+        )
+
+    def test_a_fixed_length_match_plays_on_past_a_decision(self, scripted_repo_root: Path) -> None:
+        """Six draws, one past the decision at the fifth, and ``complete`` tallies them."""
+        code, messages = self._run(scripted_repo_root, "--max-games", "6", "--no-early-stop")
+
+        assert code == 0
+        assert [m for m in messages if m["type"] == "error"] == []
+        fifth = [m for m in messages if m["type"] == "progress"][4]
+        assert cast(float, fifth["llr"]) <= cast(float, fifth["lower_bound"])
+        game_results = [m for m in messages if m["type"] == "game_result"]
+        assert len(game_results) == 6
+        complete = messages[-1]
+        assert (complete["type"], complete["result"], complete["total_games"]) == (
+            "complete",
+            "fixed",
+            6,
+        )
+        tally = (complete.get("wins"), complete.get("losses"), complete.get("draws"))
+        assert (tally, complete.get("errors")) == ((0, 0, 6), 0)
+        terminations = cast("dict[str, int]", complete.get("terminations", {}))
+        assert sum(terminations.values()) == 6
+        for game in game_results:
+            assert game["result"] == "1/2-1/2"
+        assert (complete.get("elo"), complete.get("elo_lower"), complete.get("elo_upper")) == (
+            0.0,
+            0.0,
+            0.0,
+        )
