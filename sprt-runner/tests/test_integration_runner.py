@@ -21,6 +21,7 @@ import json
 import multiprocessing
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -30,6 +31,7 @@ import time
 from pathlib import Path
 from typing import IO, cast
 
+import chess
 import pytest
 from shared.storage.models import GameResult
 from shared.time_control import (
@@ -41,7 +43,9 @@ from shared.time_control import (
 from shared.uci_client import UCIClient
 from sprt_runner.adjudication import AdjudicationConfig
 from sprt_runner.game import GameConfig, TerminationReason, play_game
+from sprt_runner.openings import load_openings, shuffle_openings
 from sprt_runner.runner import (
+    DEFAULT_BOOK,
     RunConfig,
     WorkerTask,
     _play_single_game,  # type: ignore[reportPrivateUsage]
@@ -52,6 +56,19 @@ pytestmark = pytest.mark.integration
 
 # Repo root — two levels up from this test file.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _add_initial_position_book(root: Path) -> None:
+    """Give a temporary repo root the book the CLI plays without ``--book``: the initial position.
+
+    Runs from these roots then play every game from the initial position, as
+    they did before the CLI had a default book (#12). Some of their tests
+    rely on every game being the same, which the real book, shuffled for
+    each run, would vary from run to run.
+    """
+    book = root / DEFAULT_BOOK
+    book.parent.mkdir(parents=True, exist_ok=True)
+    book.write_text(f"{chess.STARTING_FEN}\n")
 
 
 def _parse_json_lines(raw: str) -> list[dict[str, object]]:
@@ -409,6 +426,7 @@ def scripted_repo_root(tmp_path: Path) -> Path:
     (tmp_path / "engines.json").write_text(
         json.dumps([_entry("slow-engine", 150), _entry("fast-engine", 0)])
     )
+    _add_initial_position_book(tmp_path)
     return tmp_path
 
 
@@ -499,6 +517,7 @@ def hung_repo_root(tmp_path: Path) -> Path:
         "run": f"{sys.executable} {_SCRIPTED_ENGINE} --sleep-ms 60000 --go-log {go_log}",
     }
     (tmp_path / "engines.json").write_text(json.dumps([entry]))
+    _add_initial_position_book(tmp_path)
     return tmp_path
 
 
@@ -735,6 +754,7 @@ def registry_repo(tmp_path: Path) -> tuple[Path, str]:
     commit = subprocess.run(
         [*git, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30, check=True
     ).stdout.strip()
+    _add_initial_position_book(tmp_path)
     return tmp_path, commit
 
 
@@ -816,6 +836,7 @@ def startup_repo_root(tmp_path: Path) -> Path:
         _entry("slow-starter", "--startup-delay-ms", "4000"),
     ]
     (tmp_path / "engines.json").write_text(json.dumps(entries))
+    _add_initial_position_book(tmp_path)
     return tmp_path
 
 
@@ -988,6 +1009,136 @@ class TestGameLimitsThroughTheCLI:
         )
 
 
+def _register_fast_engine(root: Path) -> None:
+    """Register ``fast-engine``, the scripted engine with instant searches, in ``root``."""
+    (root / "engines" / "scripted").mkdir(parents=True)
+    entry = {
+        "id": "fast-engine",
+        "name": "fast-engine",
+        "dir": "engines/scripted",
+        "build": None,
+        "run": f"{sys.executable} {_SCRIPTED_ENGINE}",
+    }
+    (root / "engines.json").write_text(json.dumps([entry]))
+
+
+@pytest.fixture
+def default_book_root(tmp_path: Path) -> Path:
+    """Create a temporary repo root holding the real books and a fast scripted engine."""
+    _register_fast_engine(tmp_path)
+    books = Path(DEFAULT_BOOK).parent
+    (tmp_path / books).symlink_to(_REPO_ROOT / books, target_is_directory=True)
+    return tmp_path
+
+
+class TestDefaultBookThroughTheCLI:
+    """Without ``--book``, the CLI plays the book at the default path in its seed's order (#12).
+
+    The run's first line records the seed.
+    """
+
+    @pytest.mark.parametrize("seed_args", [("--seed", "7"), ()], ids=["seeded", "unseeded"])
+    def test_games_start_from_the_book_in_the_recorded_seeds_order(
+        self, default_book_root: Path, seed_args: tuple[str, ...]
+    ) -> None:
+        """One worker plays four games, so they finish in the order they start.
+
+        They come from the run's first two positions, each twice.
+        """
+        games_dir = default_book_root / "games"
+        code, messages = _run_cli(
+            default_book_root,
+            120,
+            *("--base", "fast-engine", "--test", "fast-engine", "--tc", "depth=1"),
+            *("--max-games", "4", "--no-early-stop", "--output-dir", str(games_dir), *seed_args),
+        )
+
+        assert code == 0
+        assert [m for m in messages if m["type"] == "error"] == []
+        start = messages[0]
+        assert start["type"] == "start"
+        seed = cast(int, start["seed"])
+        if seed_args:
+            assert seed == 7
+        order = shuffle_openings(load_openings(_REPO_ROOT / DEFAULT_BOOK), seed)
+        game_ids = [m["game_id"] for m in messages if m["type"] == "game_result"]
+        start_fens = [
+            json.loads((games_dir / f"{game_id}.eval.json").read_text())["start_fen"]
+            for game_id in game_ids
+        ]
+        assert start_fens == [order[0], order[0], order[1], order[1]]
+
+    def test_runs_without_a_seed_each_pick_their_own(self, default_book_root: Path) -> None:
+        """Each CLI run picks a fresh seed, so two runs don't play the same order.
+
+        A seed source that only varied within one process would give every run
+        the same one.
+        """
+        seeds: list[object] = []
+        for _ in range(2):
+            code, messages = _run_cli(
+                default_book_root,
+                120,
+                *("--base", "fast-engine", "--test", "fast-engine", "--tc", "depth=1"),
+                *("--max-games", "1"),
+            )
+            assert code == 0
+            assert messages[0]["type"] == "start"
+            seeds.append(messages[0]["seed"])
+        assert seeds[0] != seeds[1]
+
+    def test_a_run_with_no_book_at_the_default_path_stops(self, tmp_path: Path) -> None:
+        """It doesn't fall back to the initial position, and no other book stands in.
+
+        The default path is resolved from the working directory, as ``engines.json``
+        is, so a run from a directory without ``books/`` can't load it.
+        """
+        _register_fast_engine(tmp_path)
+
+        code, messages = _run_cli(
+            tmp_path, 60, *("--base", "fast-engine", "--test", "fast-engine", "--tc", "depth=1")
+        )
+
+        assert code == 1
+        message = f"Failed to load opening book: EPD file not found: {DEFAULT_BOOK}"
+        assert messages == [{"type": "error", "message": message}]
+
+    def test_the_start_line_reaches_a_reader_before_any_game_ends(
+        self, hung_repo_root: Path
+    ) -> None:
+        """The seed is on the pipe at once, so a run killed before its first result has it.
+
+        The engine takes 60 s over each search, so no game can end within the 20 s
+        this waits. The line is flushed, and starting the first worker flushes
+        stdout too, as multiprocessing does before every start, so either would do.
+        """
+        cmd = [
+            *(sys.executable, "-m", "sprt_runner", "run", "--base", "hung-engine"),
+            *("--test", "hung-engine", "--tc", "movetime=100000"),
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=hung_repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            assert proc.stdout is not None
+            readable, _, _ = select.select([proc.stdout], [], [], 20)
+            assert readable, "the runner printed nothing within 20 s"
+            first = json.loads(proc.stdout.readline())
+            assert first["type"] == "start"
+            assert isinstance(first["seed"], int)
+        finally:
+            _kill_session(proc.pid)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+            if proc.stdout is not None:
+                proc.stdout.close()
+
+
 @pytest.fixture
 def hang_first_repo_root(tmp_path: Path) -> Path:
     """Create a temporary repo root whose test engines hang in their first game (#209).
@@ -1019,6 +1170,7 @@ def hang_first_repo_root(tmp_path: Path) -> Path:
         ),
     ]
     (tmp_path / "engines.json").write_text(json.dumps(entries))
+    _add_initial_position_book(tmp_path)
     return tmp_path
 
 

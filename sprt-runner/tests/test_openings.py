@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from sprt_runner.openings import (
     load_openings,
     load_pgn_openings,
     make_opening_pairs,
+    shuffle_openings,
 )
 
 
@@ -164,6 +166,54 @@ class TestMakeOpeningPairs:
         assert pairs[1].swap_colors is True
 
 
+class TestShuffleOpenings:
+    """A run's openings come in an order its seed fixes (#12).
+
+    In file order, every run would start on the same openings, so hundreds of
+    attempts would all be tested on the same first positions.
+    """
+
+    _FENS: tuple[str, ...] = tuple(f"position {i}" for i in range(20))
+
+    def test_the_order_is_not_the_files(self) -> None:
+        assert shuffle_openings(list(self._FENS), seed=1) != list(self._FENS)
+
+    def test_each_seed_gives_its_own_order(self) -> None:
+        orders = {tuple(shuffle_openings(list(self._FENS), seed=seed)) for seed in range(5)}
+        assert len(orders) == 5
+
+    def test_the_same_seed_gives_the_same_order(self) -> None:
+        first = shuffle_openings(list(self._FENS), seed=7)
+        assert shuffle_openings(list(self._FENS), seed=7) == first
+
+    def test_a_seed_still_gives_the_order_it_gave_when_recorded(self) -> None:
+        """A recorded seed replays its run's order, in a new process too.
+
+        This pins the order :mod:`random` gives for seed 12 on Python 3.13.
+        :mod:`random` doesn't promise its shuffle across Python versions, so if
+        this fails after an upgrade, seeds recorded before it no longer
+        reproduce their runs' order. The input isn't sorted, so an order that
+        sorted the positions first would fail too.
+        """
+        assert shuffle_openings(["e", "c", "a", "f", "b", "d"], seed=12) == [
+            "d",
+            "c",
+            "e",
+            "b",
+            "a",
+            "f",
+        ]
+
+    def test_every_position_appears_once(self) -> None:
+        shuffled = shuffle_openings(list(self._FENS), seed=3)
+        assert sorted(shuffled) == sorted(self._FENS)
+
+    def test_the_callers_list_is_left_alone(self) -> None:
+        fens = list(self._FENS)
+        shuffle_openings(fens, seed=3)
+        assert fens == list(self._FENS)
+
+
 class TestOpeningPair:
     """Tests for OpeningPair dataclass."""
 
@@ -221,6 +271,25 @@ class TestLoadPGNOpenings:
         fens = load_pgn_openings(pgn_path)
         assert fens == []
 
+    @pytest.mark.parametrize("setup", ['[SetUp "1"]\n', ""], ids=["with_setup", "without_setup"])
+    def test_a_game_with_a_fen_and_no_moves_is_its_fen(self, tmp_path: Path, setup: str) -> None:
+        """A game that sets up a position, with no moves, is still an opening (#12).
+
+        python-chess reads the FEN with or without a ``SetUp`` tag.
+        """
+        fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+        pgn_path = tmp_path / "setup.pgn"
+        pgn_path.write_text(f'[Event "T"]\n{setup}[FEN "{fen}"]\n\n*\n')
+        assert load_pgn_openings(pgn_path) == [fen]
+
+    def test_the_games_after_one_that_describes_no_opening_still_load(self, tmp_path: Path) -> None:
+        """Text that isn't PGN is skipped, and the game after it is still an opening (#12)."""
+        pgn_path = tmp_path / "mixed.pgn"
+        pgn_path.write_text('not a position\n\n[Event "T"]\n\n1. e4 *\n')
+        assert load_pgn_openings(pgn_path) == [
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+        ]
+
 
 class TestLoadOpenings:
     """Tests for the unified load_openings dispatcher."""
@@ -244,3 +313,38 @@ class TestLoadOpenings:
         txt_path.write_text("some content")
         with pytest.raises(ValueError, match="Unsupported opening book format"):
             load_openings(txt_path)
+
+    @pytest.mark.parametrize(
+        ("name", "content"),
+        [
+            ("empty.epd", ""),
+            ("unparseable.epd", "not a position\n# a comment\n\n"),
+            ("empty.pgn", ""),
+            ("not_pgn.pgn", "not a position\n"),
+            ("epd_as_pgn.pgn", "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1\n"),
+            ("illegal_first_move.pgn", '[Event "T"]\n\n1. e5 *\n'),
+        ],
+        ids=[
+            "empty_epd",
+            "no_line_parses",
+            "empty_pgn",
+            "not_pgn",
+            "epd_as_pgn",
+            "illegal_first_move",
+        ],
+    )
+    def test_a_book_with_no_positions_is_an_error(
+        self, tmp_path: Path, name: str, content: str
+    ) -> None:
+        """A book with nothing to play is refused, not read as an empty list (#12).
+
+        The runner used to fall back to the initial position for one. python-chess
+        reads text that isn't PGN, and a game whose first move is illegal, as a
+        game with no moves, which would be the initial position. The error names
+        the file, not its path, since the backend relays it to the browser.
+        """
+        path = tmp_path / name
+        path.write_text(content)
+        with pytest.raises(ValueError, match=re.escape(f"no positions in {name}")) as exc_info:
+            load_openings(path)
+        assert str(tmp_path) not in str(exc_info.value)

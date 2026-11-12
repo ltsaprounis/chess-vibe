@@ -50,3 +50,6 @@ If the `random-engine` venv is not built, integration tests will skip automatica
 Licensed under [GPL-3.0-or-later](LICENSE), because the project builds on
 [python-chess](https://github.com/niklasf/python-chess) and
 [Stockfish](https://github.com/official-stockfish/Stockfish), both GPL-3.
+
+The exception is the opening book in `books/`, which is CC0 1.0, as
+[books/README.md](books/README.md) records.

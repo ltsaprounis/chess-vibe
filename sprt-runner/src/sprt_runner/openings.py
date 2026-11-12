@@ -1,13 +1,14 @@
 """Opening book loader and pair generator for SPRT testing.
 
-Loads opening positions from EPD and PGN files and generates opening
-pairs where each opening is played twice with colours swapped to
-eliminate first-move advantage bias.
+Loads opening positions from EPD and PGN files, puts them in an order a
+seed fixes, and generates opening pairs where each opening is played
+twice with colours swapped to eliminate first-move advantage bias.
 """
 
 from __future__ import annotations
 
 import io
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,7 +84,8 @@ def load_pgn_openings(path: Path) -> list[str]:
 
     Each game in the PGN file is replayed and the final position's FEN
     is used as an opening. This allows PGN opening books where each
-    game contains a partial game (the opening line).
+    game contains a partial game (the opening line). A game with no moves
+    and no ``FEN`` header is skipped, since it describes no opening (#12).
 
     Args:
         path: Path to the PGN file.
@@ -106,9 +108,16 @@ def load_pgn_openings(path: Path) -> list[str]:
         if game is None:
             break
 
+        # A game with no moves and no FEN describes no opening. It's what
+        # python-chess reads from text that isn't PGN, or from a game whose
+        # first move is illegal, and kept it would be the initial position.
+        moves = list(game.mainline_moves())
+        if not moves and "FEN" not in game.headers:
+            continue
+
         # Walk to the end of the mainline
         board = game.board()
-        for move in game.mainline_moves():
+        for move in moves:
             board.push(move)
 
         fens.append(board.fen())
@@ -125,18 +134,46 @@ def load_openings(path: Path) -> list[str]:
         path: Path to the opening book file (.epd or .pgn).
 
     Returns:
-        A list of FEN strings.
+        A list of FEN strings, never empty.
 
     Raises:
         FileNotFoundError: If the file does not exist.
-        ValueError: If the file extension is not supported.
+        ValueError: If the file extension is not supported, or the book has
+            no positions, as when it's empty or none of its lines parse. A run
+            given such a book would otherwise play every game from the initial
+            position (#12).
     """
     suffix = path.suffix.lower()
     if suffix == ".epd":
-        return load_epd_openings(path)
-    if suffix == ".pgn":
-        return load_pgn_openings(path)
-    raise ValueError(f"Unsupported opening book format: {suffix!r} (expected .epd or .pgn)")
+        fens = load_epd_openings(path)
+    elif suffix == ".pgn":
+        fens = load_pgn_openings(path)
+    else:
+        raise ValueError(f"Unsupported opening book format: {suffix!r} (expected .epd or .pgn)")
+    if not fens:
+        # The file's name, not its path: the backend relays this to the browser.
+        raise ValueError(f"no positions in {path.name}")
+    return fens
+
+
+def shuffle_openings(fens: list[str], seed: int) -> list[str]:
+    """Return the positions in an order fixed by ``seed``.
+
+    In file order, every run would start on the same openings. The same seed
+    and positions give the same order, on the same Python version: the order
+    comes from :mod:`random`, which doesn't promise its shuffle across
+    versions.
+
+    Args:
+        fens: The book's positions, which are left as they are.
+        seed: The seed for the order.
+
+    Returns:
+        A new list with every position in ``fens``, shuffled.
+    """
+    shuffled = list(fens)
+    random.Random(seed).shuffle(shuffled)
+    return shuffled
 
 
 def make_opening_pairs(fens: list[str]) -> list[OpeningPair]:

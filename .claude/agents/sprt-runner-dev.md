@@ -25,8 +25,8 @@ Scope and boundaries:
 - Edit only `sprt-runner/` (source and `sprt-runner/tests/`).
 - You are a CLI, not a library: the backend runs
   `python -m sprt_runner run ...` and parses your stdout. The CLI
-  flags and the JSON-lines message schema (game_result / progress /
-  error / interrupted / complete) are a contract with
+  flags and the JSON-lines message schema (start / game_result /
+  progress / error / interrupted / complete) are a contract with
   `backend/src/backend/services/sprt_service.py` — never change
   either unless the task explicitly asks; report the needed contract
   change instead. stdout is protocol; logs and noise go to stderr.
