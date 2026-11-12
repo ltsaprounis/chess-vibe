@@ -15,7 +15,7 @@ Architecture principles, ownership boundaries, and high-level component design f
 | Owner | Scope | Details |
 |---|---|---|
 | **Human** | `engines/my-engine/` | 100% hand-written. Board representation, move generation, search, evaluation, UCI adapter, and all tests. Fully standalone — zero dependencies on the infrastructure. **Never generate, modify, or refactor any file under this path.** |
-| **Copilot** | Everything else | `shared/`, `engines/random-engine/`, `engines/external/`, `sprt-runner/`, `backend/`, `frontend/`, `scripts/`, `data/`, and all project-level config. Builds all infrastructure that drives engines as UCI subprocesses. |
+| **Copilot** | Everything else | `shared/`, `engines/random-engine/`, `engines/external/`, `sprt-runner/`, `backend/`, `frontend/`, `scripts/`, `books/`, `data/`, and all project-level config. Builds all infrastructure that drives engines as UCI subprocesses. |
 
 ## High-Level Architecture
 
@@ -109,8 +109,8 @@ chess-vibe/
 │       ├── pages/                # Play, SPRTTests, GameReplay
 │       └── services/             # API client
 ├── engines.json                  # Engine registry (build & run commands)
+├── books/                        # Vendored opening books; the runner's default (EPD)
 ├── data/                         # Persistent storage (PGN + JSON sidecars)
-│   └── books/                    # Opening book files (EPD, PGN)
 └── scripts/                      # Dev tooling (setup, lint, test)
 ```
 
@@ -129,3 +129,4 @@ chess-vibe/
 - **Flat files first, SQLite later** — Start with `FileStore` (PGN + JSON sidecars). Structured filter dataclasses (`GameFilter`, `SPRTTestFilter`) ensure no filesystem assumptions leak to callers and map cleanly to SQL `WHERE` clauses.
 - **Monorepo with submodules for external engines** — Single repo for project code, git submodules for third-party engines (e.g., Stockfish) with thin wrappers.
 - **Openings owned by infrastructure, not engines** — The engine is a pure searcher. Opening book selection and book-pair generation are the responsibility of the SPRT runner and backend.
+- **The CLI plays a shuffled book by default** — Without `--book`, the runner plays from `books/2moves_v1.epd`: 40,457 positions after two moves a side, vendored unmodified from the Stockfish project's books under CC0, as `books/README.md` records. It's a static, versioned input like `engines.json`, resolved from the working directory, not data behind the repository ABC. A deterministic engine replays the same game from the same position, which adds little information and breaks the independence SPRT assumes, and in file order every run would start on the same openings. So each run shuffles the book with a seed, from `--seed` or picked at random, which its first line, `start`, records. A position's two games, one with each colour, come together. A book with no positions is fatal rather than a fallback to the initial position, and a run that has used every position logs a warning as they start to repeat. `RunConfig(book_path=None)` still plays from the initial position, for callers of `run_sprt`.

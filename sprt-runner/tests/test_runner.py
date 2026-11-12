@@ -9,6 +9,7 @@ import logging
 import multiprocessing
 import os
 import re
+import secrets
 import shlex
 import signal
 import time
@@ -35,8 +36,9 @@ from sprt_runner.game import (
     GameOutcome,
     TerminationReason,
 )
-from sprt_runner.openings import OpeningPair
+from sprt_runner.openings import OpeningPair, load_openings, shuffle_openings
 from sprt_runner.runner import (
+    DEFAULT_BOOK,
     DEFAULT_HANDSHAKE_TIMEOUT_MS,
     RunAbortedError,
     RunConfig,
@@ -54,6 +56,7 @@ from sprt_runner.runner import (
     format_game_result_message,
     format_interrupted_message,
     format_progress_message,
+    format_start_message,
     main,
     run_sprt,
     worker_entry,
@@ -243,6 +246,10 @@ class TestRunConfig:
         assert config.concurrency == 1
         assert config.alpha == 0.05
         assert config.beta == 0.05
+        # A run built in code plays from the initial position unless it's given
+        # a book: only the CLI defaults to one (#12).
+        assert config.book_path is None
+        assert config.seed is None
 
     def test_custom_concurrency(self) -> None:
         config = RunConfig(
@@ -270,6 +277,10 @@ class TestRunConfig:
 
 class TestJSONLineFormatters:
     """Tests for JSON-lines output formatting."""
+
+    def test_start_message(self) -> None:
+        """A run's first line, recording the seed for the order of its openings (#12)."""
+        assert json.loads(format_start_message(seed=7)) == {"type": "start", "seed": 7}
 
     def test_game_result_message(self) -> None:
         msg = format_game_result_message(
@@ -2633,12 +2644,16 @@ class TestSetupFailuresAreFatal:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("book_name", "reason"),
+        ("book_name", "content", "reason"),
         [
-            ("missing.epd", "EPD file not found: {path}"),
-            ("book.txt", "Unsupported opening book format: '.txt' (expected .epd or .pgn)"),
+            ("missing.epd", None, "EPD file not found: {path}"),
+            ("book.txt", None, "Unsupported opening book format: '.txt' (expected .epd or .pgn)"),
+            ("empty.epd", "", "no positions in empty.epd"),
+            ("unparseable.epd", "not a position\n", "no positions in unparseable.epd"),
+            ("empty.pgn", "", "no positions in empty.pgn"),
+            ("not_pgn.pgn", "not a position\n", "no positions in not_pgn.pgn"),
         ],
-        ids=["missing", "unsupported"],
+        ids=["missing", "unsupported", "empty", "no_line_parses", "empty_pgn", "not_pgn"],
     )
     async def test_book_load_failure_is_fatal(
         self,
@@ -2646,17 +2661,22 @@ class TestSetupFailuresAreFatal:
         capsys: pytest.CaptureFixture[str],
         tmp_path: Path,
         book_name: str,
+        content: str | None,
         reason: str,
     ) -> None:
         """A book that can't be loaded is reported as the run's only line.
 
-        The real loader runs, so both of its errors are covered: a missing
-        file (``FileNotFoundError``) and an unsupported suffix (``ValueError``).
-        The workers would deliver games, so a run that carried on without its
-        book would print results too.
+        The real loader runs, so all of its errors are covered: a missing
+        file (``FileNotFoundError``), an unsupported suffix, and a book with
+        no positions (``ValueError``). The run used to fall back to the
+        initial position for that last one (#12). The workers would deliver
+        games, so a run that carried on without its book would print results
+        too.
         """
         _patch_engines(monkeypatch, _FakeProcess)
         book_path = tmp_path / book_name
+        if content is not None:
+            book_path.write_text(content)
         config = RunConfig(
             base="base-engine",
             test="test-engine",
@@ -3603,9 +3623,20 @@ class TestGameLimits:
         assert capsys.readouterr().out == ""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("early_stop", "seed", "refusal"),
+        [
+            (False, None, "early_stop=False requires max_games"),
+            (True, -1, "seed must not be negative, got -1"),
+        ],
+        ids=["no_limit", "negative_seed"],
+    )
     async def test_a_refused_run_leaves_nothing_behind(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        early_stop: bool,
+        seed: int | None,
+        refusal: str,
     ) -> None:
         """The refusal comes before anything else ``run_sprt`` does.
 
@@ -3629,9 +3660,10 @@ class TestGameLimits:
         monkeypatch.setattr("sprt_runner.runner.cleanup_worktree", _cleanup)
         config = _quick_config(concurrency=1)
         config.base, config.test = "lab:abc1234", "lab:def5678"
-        config.early_stop = False
+        config.early_stop = early_stop
+        config.seed = seed
 
-        with pytest.raises(ValueError, match="early_stop=False requires max_games"):
+        with pytest.raises(ValueError, match=re.escape(refusal)):
             await asyncio.wait_for(run_sprt(config), timeout=3.0)
 
         loop = asyncio.get_running_loop()
@@ -3818,6 +3850,203 @@ class TestGameLimits:
             "elo_lower": pytest.approx(168.37730232002275, rel=1e-9),  # type: ignore[reportUnknownMemberType]
             "elo_upper": None,
         }
+
+
+# Five distinct positions, each after one move by White.
+_BOOK_FENS = [
+    "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+    "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1",
+    "rnbqkbnr/pppppppp/8/8/2P5/8/PP1PPPPP/RNBQKBNR b KQkq - 0 1",
+    "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R b KQkq - 1 1",
+    "rnbqkbnr/pppppppp/8/8/8/6P1/PPPPPP1P/RNBQKBNR b KQkq - 0 1",
+]
+
+
+class TestOpeningOrder:
+    """A run plays its book in an order a seed fixes, and its first line records the seed (#12).
+
+    In file order, every run would start on the same openings. A position's
+    two games, one with each colour, stay together. Each run plays exactly
+    ``max_games`` games, so none ends early on a decision.
+    """
+
+    @staticmethod
+    def _config(book: Path | None, *, seed: int | None, games: int) -> RunConfig:
+        config = _quick_config(1)
+        config.book_path = book
+        config.seed = seed
+        config.max_games = games
+        config.early_stop = False
+        return config
+
+    @staticmethod
+    def _book(tmp_path: Path) -> Path:
+        book = tmp_path / "book.epd"
+        book.write_text("".join(f"{fen}\n" for fen in _BOOK_FENS))
+        return book
+
+    @staticmethod
+    def _messages(capsys: pytest.CaptureFixture[str]) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+
+    @staticmethod
+    def _played() -> list[tuple[str | None, bool]]:
+        """Each launched game's starting position and whether the test engine was White."""
+        return [
+            (worker.task.game_config.start_fen, worker.task.swap_colors)
+            for worker in _ScriptedFakeProcess.instances
+        ]
+
+    @staticmethod
+    def _in_pairs(order: list[str]) -> list[tuple[str | None, bool]]:
+        """The games that ``order`` gives: each position twice, the base engine White first."""
+        return [(fen, swap) for fen in order for swap in (False, True)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("seed", [0, 42])
+    async def test_the_first_line_records_the_seed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        seed: int,
+    ) -> None:
+        """0 is a seed like any other, not a missing one."""
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(self._config(self._book(tmp_path), seed=seed, games=2), 5.0, monkeypatch)
+
+        messages = self._messages(capsys)
+        assert messages[0] == {"type": "start", "seed": seed}
+        assert [m["type"] for m in messages].count("start") == 1
+        assert self._played() == self._in_pairs(shuffle_openings(_BOOK_FENS, seed))[:2]
+
+    @pytest.mark.asyncio
+    async def test_a_run_without_a_book_records_its_seed_too(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A run that gets past loading its book starts with ``start``, with a book or without."""
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(self._config(None, seed=5, games=2), 5.0, monkeypatch)
+
+        assert self._messages(capsys)[0] == {"type": "start", "seed": 5}
+
+    @pytest.mark.asyncio
+    async def test_positions_come_in_the_seeds_order_in_colour_reversed_pairs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        order = shuffle_openings(_BOOK_FENS, 42)
+        assert order != _BOOK_FENS, "seed 42 must not give the file's order, or this proves nothing"
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(self._config(self._book(tmp_path), seed=42, games=10), 5.0, monkeypatch)
+
+        assert self._played() == self._in_pairs(order)
+
+    @pytest.mark.asyncio
+    async def test_without_a_seed_the_run_picks_one_and_records_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Each run picks its own seed, and plays the order its recorded seed gives.
+
+        Each seed is drawn from 2**32 values, so the hundreds of runs in #190's
+        loop rarely share an order. Five runs with five different seeds also rule
+        out a seed that doesn't change.
+        """
+        real_randbelow = secrets.randbelow
+        draws: list[int] = []
+
+        def _recording_randbelow(exclusive_upper_bound: int) -> int:
+            draws.append(exclusive_upper_bound)
+            return real_randbelow(exclusive_upper_bound)
+
+        monkeypatch.setattr("sprt_runner.runner.secrets.randbelow", _recording_randbelow)
+        book = self._book(tmp_path)
+        seeds: list[int] = []
+        for _ in range(5):
+            _ScriptedFakeProcess.reset([])
+            _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+            await _run_within(self._config(book, seed=None, games=4), 5.0, monkeypatch)
+
+            start = self._messages(capsys)[0]
+            assert start["type"] == "start"
+            seed = start["seed"]
+            assert isinstance(seed, int)
+            assert 0 <= seed < 2**32
+            assert self._played() == self._in_pairs(shuffle_openings(_BOOK_FENS, seed))[:4]
+            seeds.append(seed)
+        assert len(set(seeds)) == 5
+        assert draws == [2**32] * 5
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("games", "passes_begun"),
+        [(10, 0), (11, 1), (21, 2)],
+        ids=["book_played_once", "one_repeat", "two_repeats"],
+    )
+    async def test_a_warning_each_time_the_book_starts_again(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+        games: int,
+        passes_begun: int,
+    ) -> None:
+        """Five positions give ten games, so the eleventh repeats a position, as does the 21st."""
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        config = self._config(self._book(tmp_path), seed=42, games=games)
+
+        with caplog.at_level(logging.WARNING, logger="sprt_runner.runner"):
+            await _run_within(config, 5.0, monkeypatch)
+
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "sprt_runner.runner" and record.levelno == logging.WARNING
+        ]
+        assert (
+            warnings
+            == ["Every position in the opening book has been used; positions now repeat"]
+            * passes_begun
+        )
+        # Each pass through the book plays the run's order again.
+        one_pass = self._in_pairs(shuffle_openings(_BOOK_FENS, 42))
+        assert self._played() == (one_pass * 3)[:games]
+
+    @pytest.mark.asyncio
+    async def test_a_negative_seed_is_refused_before_anything_starts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """random gives -1 the order of 1, so the start line would record a seed --seed refuses.
+
+        main() refuses one with an ``error`` line. A caller of ``run_sprt`` gets a
+        ``ValueError`` before anything launches or prints.
+        """
+        _ScriptedFakeProcess.reset([])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        config = self._config(self._book(tmp_path), seed=-1, games=2)
+
+        with pytest.raises(ValueError, match=re.escape("seed must not be negative, got -1")):
+            await _run_within(config, 3.0, monkeypatch)
+
+        assert _ScriptedFakeProcess.instances == []
+        assert capsys.readouterr().out == ""
 
 
 class TestRunConfigKeepWorktrees:
@@ -4199,6 +4428,78 @@ class TestMainGameLimits:
 
         assert exc_info.value.code == 1
         assert capsys.readouterr().out.splitlines() == [format_error_message(expected)]
+
+
+class TestMainBookAndSeed:
+    """main() plays the default book without ``--book``, and hands ``--seed`` to RunConfig (#12).
+
+    Without a book, every game would start from the initial position, so a
+    deterministic engine would replay the same game.
+    """
+
+    @staticmethod
+    def _run_main(monkeypatch: pytest.MonkeyPatch, *extra_args: str) -> RunConfig:
+        """Run main() with the given extra flags and return the resulting RunConfig."""
+        captured: dict[str, RunConfig] = {}
+
+        async def _fake_run_sprt(config: RunConfig) -> None:
+            captured["config"] = config
+
+        monkeypatch.setattr("sprt_runner.runner.run_sprt", _fake_run_sprt)
+        monkeypatch.setattr("sys.argv", ["sprt_runner", *_RUN_ARGV, *extra_args])
+
+        main()
+
+        return captured["config"]
+
+    def test_without_book_the_default_book_is_played(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._run_main(monkeypatch)
+        assert config.book_path == Path(DEFAULT_BOOK) == Path("books/2moves_v1.epd")
+
+    def test_a_book_reaches_run_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._run_main(monkeypatch, "--book", "my/book.pgn")
+        assert config.book_path == Path("my/book.pgn")
+
+    def test_an_empty_book_flag_is_not_the_initial_position(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--book ''`` used to mean no book, so every game began at the initial position.
+
+        Now it's a path like any other, and one no run can load.
+        """
+        config = self._run_main(monkeypatch, "--book", "")
+        assert config.book_path == Path("")
+        with pytest.raises(ValueError, match="Unsupported opening book format"):
+            load_openings(Path(""))
+
+    def test_no_seed_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The run then picks one, and records it on its first line."""
+        assert self._run_main(monkeypatch).seed is None
+
+    @pytest.mark.parametrize("seed", [0, 7, 2**40])
+    def test_a_seed_reaches_run_config(self, monkeypatch: pytest.MonkeyPatch, seed: int) -> None:
+        assert self._run_main(monkeypatch, "--seed", str(seed)).seed == seed
+
+    def test_a_negative_seed_exits_1_with_an_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """:mod:`random` gives a seed and its negative the same order, so -1 would replay 1."""
+
+        async def _fail_if_called(config: RunConfig) -> None:
+            raise AssertionError("run_sprt must not be reached when validation fails")
+
+        monkeypatch.setattr("sprt_runner.runner.run_sprt", _fail_if_called)
+        monkeypatch.setattr("sys.argv", ["sprt_runner", *_RUN_ARGV, "--seed", "-1"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        assert capsys.readouterr().out.splitlines() == [
+            format_error_message("--seed must not be negative, got -1")
+        ]
 
 
 class TestMainStartMethod:

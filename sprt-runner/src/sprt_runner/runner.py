@@ -9,6 +9,9 @@ inside each worker for UCI I/O. Workers report results via
 ``multiprocessing.Queue``; the coordinator aggregates single-threaded.
 
 Message types:
+    - ``start``: The run's first line, once its opening book has loaded. It
+      records the seed for the order of the book's positions, which
+      ``--seed`` replays.
     - ``game_result``: Result of a single game.
     - ``progress``: Running SPRT statistics.
     - ``error``: An error. Most concern one game or worker, and the run
@@ -18,6 +21,10 @@ Message types:
       at ``--max-games``, ``inconclusive`` without a decision or ``fixed``
       with ``--no-early-stop``. It carries the tallies, the games per
       termination, and an Elo estimate with its 95% interval.
+    - ``interrupted``: The run's last line when SIGTERM, SIGHUP or SIGINT
+      stops it once its games have begun, with the number of games played.
+      A signal before then, as during an engine build, can end the run with
+      no line at all.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ import multiprocessing
 import multiprocessing.forkserver
 import os
 import queue
+import secrets
 import shlex
 import signal
 import sys
@@ -58,7 +66,12 @@ from sprt_runner.game import (
     TerminationReason,
     play_game,
 )
-from sprt_runner.openings import OpeningPair, load_openings, make_opening_pairs
+from sprt_runner.openings import (
+    OpeningPair,
+    load_openings,
+    make_opening_pairs,
+    shuffle_openings,
+)
 from sprt_runner.sprt import SPRTDecision, estimate_elo, sprt_test
 from sprt_runner.worktree import (
     EngineSpec,
@@ -87,6 +100,11 @@ _QUEUE_TIMEOUT_SECONDS: float = 0.5
 # hangs on ``isready``, plus up to 5 s while it's told to quit.
 DEFAULT_HANDSHAKE_TIMEOUT_MS: int = 30_000
 
+# The book the CLI plays from without ``--book``. It's resolved from the
+# working directory, which is the repo root, as ``engines.json`` is.
+# ``books/README.md`` says where it comes from (#12).
+DEFAULT_BOOK: str = "books/2moves_v1.epd"
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -105,7 +123,9 @@ class RunConfig:
         elo1: Alternative hypothesis Elo difference.
         alpha: Type-I error rate.
         beta: Type-II error rate.
-        book_path: Path to the opening book file (EPD or PGN).
+        book_path: Path to the opening book file (EPD or PGN), or None to
+            play every game from the initial position. The CLI passes
+            :data:`DEFAULT_BOOK` when ``--book`` is omitted.
         concurrency: Number of concurrent game worker processes.
         adjudication: Adjudication configuration.
         repo_root: Root of the git repository.
@@ -124,6 +144,8 @@ class RunConfig:
         early_stop: Whether an SPRT decision ends the run. Without it, the
             run plays exactly ``max_games`` games, which must then be set:
             :func:`run_sprt` refuses to start otherwise.
+        seed: Seed for the order of the book's positions, or None for the
+            run to pick one at random. The run's ``start`` line records it.
     """
 
     base: str
@@ -145,6 +167,7 @@ class RunConfig:
     handshake_timeout_ms: int = DEFAULT_HANDSHAKE_TIMEOUT_MS
     max_games: int | None = None
     early_stop: bool = True
+    seed: int | None = None
 
 
 class RunAbortedError(Exception):
@@ -159,6 +182,19 @@ class RunAbortedError(Exception):
 # ---------------------------------------------------------------------------
 # JSON-lines message formatters
 # ---------------------------------------------------------------------------
+
+
+def format_start_message(seed: int) -> str:
+    """Format a run's first line as a JSON-lines message.
+
+    Args:
+        seed: The seed for the order of the book's positions. Passing it as
+            ``--seed`` replays that order.
+
+    Returns:
+        Single-line JSON string.
+    """
+    return json.dumps({"type": "start", "seed": seed})
 
 
 def format_game_result_message(
@@ -758,7 +794,8 @@ def _collect_worktree_paths(
 async def run_sprt(config: RunConfig) -> None:
     """Run a complete SPRT test.
 
-    Resolves engine paths, loads opening book, plays games using
+    Resolves engine paths, loads the opening book in an order
+    ``config.seed`` fixes, plays games using
     ``multiprocessing`` for game-level parallelism (with ``asyncio``
     inside each worker for UCI I/O), and streams JSON-lines progress
     to stdout. Workers report via ``multiprocessing.Queue``; the
@@ -779,9 +816,11 @@ async def run_sprt(config: RunConfig) -> None:
     Raises:
         ValueError: If the game limits would never end the run:
             ``config.max_games`` below 1, or ``config.early_stop`` off with no
-            ``config.max_games``. It's raised before anything starts.
+            ``config.max_games``. Also if ``config.seed`` is negative, since
+            :mod:`random` gives a seed and its negative the same order. It's
+            raised before anything starts.
         RunAbortedError: If the run stopped on a fatal error, such as a failed
-            engine build, an unreadable opening book, a broken result queue,
+            engine build, an unreadable or empty opening book, a broken result queue,
             or a full round of worker deaths or of failed games. It's raised
             after the error is printed and after the workers and worktrees
             are cleaned up.
@@ -792,6 +831,10 @@ async def run_sprt(config: RunConfig) -> None:
         raise ValueError(f"max_games must be at least 1, got {config.max_games}")
     if not config.early_stop and config.max_games is None:
         raise ValueError("early_stop=False requires max_games")
+    # random gives a seed and its negative the same order, so the start line
+    # would record a seed that --seed refuses.
+    if config.seed is not None and config.seed < 0:
+        raise ValueError(f"seed must not be negative, got {config.seed}")
 
     # SIGTERM cancels the task, which triggers the same graceful shutdown path
     # as SIGINT (KeyboardInterrupt → CancelledError). So does SIGHUP. A
@@ -855,14 +898,17 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
     except Exception as e:
         _abort(f"Failed to resolve engines: {e}")
 
-    # Load opening book
+    # Load the opening book, in this run's order. Played in file order, every
+    # run would start on the same openings (#12).
+    seed = config.seed if config.seed is not None else secrets.randbelow(2**32)
     opening_pairs: list[OpeningPair] = []
     if config.book_path is not None:
         try:
             fens = load_openings(config.book_path)
-            opening_pairs = make_opening_pairs(fens)
+            opening_pairs = make_opening_pairs(shuffle_openings(fens, seed))
         except Exception as e:
             _abort(f"Failed to load opening book: {e}")
+    print(format_start_message(seed), flush=True)
 
     # SPRT tracking
     wins = 0
@@ -911,6 +957,12 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                 start_fen: str | None = None
                 swap_colors = False
                 if opening_pairs:
+                    # A deterministic engine replays its game from a position
+                    # it has played before, so repeats add little information.
+                    if pair_index and pair_index % len(opening_pairs) == 0:
+                        logger.warning(
+                            "Every position in the opening book has been used; positions now repeat"
+                        )
                     pair = opening_pairs[pair_index % len(opening_pairs)]
                     start_fen = pair.fen
                     swap_colors = pair.swap_colors
@@ -1224,7 +1276,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--elo0", type=float, default=0.0, help="H0 Elo bound")
     run_parser.add_argument("--elo1", type=float, default=5.0, help="H1 Elo bound")
-    run_parser.add_argument("--book", type=str, default=None, help="Path to opening book (EPD/PGN)")
+    run_parser.add_argument(
+        "--book",
+        type=str,
+        default=DEFAULT_BOOK,
+        help=f"Path to opening book (EPD/PGN); default: {DEFAULT_BOOK}",
+    )
     run_parser.add_argument(
         "--concurrency", type=int, default=1, help="Number of concurrent game worker processes"
     )
@@ -1287,6 +1344,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Play exactly --max-games games whatever the LLR; the result is fixed",
+    )
+    run_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed for the order of the book's positions; random if omitted. "
+        "The run's first line, start, records it",
     )
 
     return parser
@@ -1359,6 +1423,12 @@ def main() -> None:
         print(format_error_message("--no-early-stop requires --max-games"), flush=True)
         sys.exit(1)
 
+    # random gives a seed and its negative the same order, so -1 would replay 1.
+    if args.seed is not None and args.seed < 0:
+        message = f"--seed must not be negative, got {args.seed}"
+        print(format_error_message(message), flush=True)
+        sys.exit(1)
+
     # Unlike --book/--output-dir, an explicitly-supplied path is validated
     # up front: silently running for hours without the adjudication the user
     # asked for is worse than refusing to start.
@@ -1384,7 +1454,7 @@ def main() -> None:
         elo1=args.elo1,
         alpha=args.alpha,
         beta=args.beta,
-        book_path=Path(args.book) if args.book else None,
+        book_path=Path(args.book),
         concurrency=args.concurrency,
         adjudication=adjudication,
         keep_worktrees=args.keep_worktrees,
@@ -1395,6 +1465,7 @@ def main() -> None:
         handshake_timeout_ms=args.handshake_timeout_ms,
         max_games=args.max_games,
         early_stop=not args.no_early_stop,
+        seed=args.seed,
     )
 
     # Start workers from a forkserver with the workers' module preloaded,
