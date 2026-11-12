@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
+from collections.abc import Awaitable
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -513,3 +517,206 @@ class TestUCIClientErrorHandling:
             await client.quit()
             mock_proc.kill.assert_called_once()
             assert not client.is_running
+
+
+# ---------------------------------------------------------------------------
+# quit() leaves no engine running (#209)
+# ---------------------------------------------------------------------------
+
+
+async def _started_client(mock_proc: MagicMock) -> UCIClient:
+    """Return a client already started, whose engine process is ``mock_proc``."""
+    client = UCIClient("/fake/engine")
+    with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = mock_proc
+        await client.start()
+    return client
+
+
+def _wait_until_killed(
+    mock_proc: MagicMock, *, kill_error: Exception | None = None
+) -> asyncio.Event:
+    """Make the engine exit only when it's killed, as one that ignores ``quit`` does.
+
+    ``kill()`` raises ``kill_error``, if given, after the engine has gone.
+    ``wait()`` returns at once if the engine has exited by then, as asyncio's
+    does. Returns an event that is set once ``wait()`` has been called.
+    """
+    waiting = asyncio.Event()
+    killed = asyncio.Event()
+
+    def _kill() -> None:
+        killed.set()
+        if kill_error is not None:
+            raise kill_error
+
+    async def _wait() -> int:
+        waiting.set()
+        if mock_proc.returncode is None:
+            await killed.wait()
+        return -9
+
+    mock_proc.kill = MagicMock(side_effect=_kill)
+    mock_proc.wait = AsyncMock(side_effect=_wait)
+    return waiting
+
+
+class TestUCIClientQuitKillsEngines:
+    """quit() kills and reaps an engine that can't be told to quit (#209)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [ConnectionResetError("Connection lost"), BrokenPipeError(32, "Broken pipe")],
+        ids=["connection_reset", "broken_pipe"],
+    )
+    async def test_an_engine_with_a_closed_input_is_killed_then_reaped(
+        self, error: ConnectionError
+    ) -> None:
+        """Writing ``quit`` fails, so the engine is killed at once, then waited for.
+
+        asyncio's ``drain()`` raises ``ConnectionResetError`` once the engine
+        has closed its end of the pipe. The engine may still be running, as one
+        stuck in a loop after closing its input would be.
+        """
+        mock_proc = _make_mock_process([])
+        mock_proc.stdin.drain = AsyncMock(side_effect=error)
+        events: list[str] = []
+        mock_proc.kill = MagicMock(side_effect=lambda: events.append("kill"))
+
+        async def _wait() -> int:
+            events.append("wait")
+            return -9
+
+        mock_proc.wait = AsyncMock(side_effect=_wait)
+        client = await _started_client(mock_proc)
+
+        with contextlib.suppress(ConnectionError):
+            await client.quit()
+
+        assert events == ["kill", "wait"]
+        assert not client.is_running
+
+    @pytest.mark.asyncio
+    async def test_a_failed_write_isnt_raised_but_is_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The failure no longer propagates, so the warning is its only trace."""
+        mock_proc = _make_mock_process([])
+        error = ConnectionResetError("Connection lost")
+        mock_proc.stdin.drain = AsyncMock(side_effect=error)
+        client = await _started_client(mock_proc)
+
+        with caplog.at_level(logging.WARNING, logger="shared.uci_client"):
+            await client.quit()
+
+        assert not client.is_running
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert [(r.name, r.getMessage()) for r in warnings] == [
+            ("shared.uci_client", f"Engine did not quit gracefully, killing it: {error!r}")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_engine_gets_5_s_to_exit_after_quit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """quit() waits on the engine with a 5 s limit, as its docstring says."""
+        limits: list[float | None] = []
+
+        async def _recording_wait_for(aw: Awaitable[Any], timeout: float | None) -> Any:
+            limits.append(timeout)
+            return await aw
+
+        mock_proc = _make_mock_process([])
+        client = await _started_client(mock_proc)
+        monkeypatch.setattr("shared.uci_client.asyncio.wait_for", _recording_wait_for)
+
+        await client.quit()
+
+        assert limits == [5.0]
+
+    @pytest.mark.asyncio
+    async def test_an_engine_gone_by_the_time_its_killed_is_still_waited_for(self) -> None:
+        """``kill()`` raises ``ProcessLookupError`` once asyncio has finished with the process.
+
+        That happens when the engine exits between the failed write and the kill.
+        """
+        mock_proc = _make_mock_process([])
+        mock_proc.stdin.drain = AsyncMock(side_effect=ConnectionResetError("Connection lost"))
+        mock_proc.kill = MagicMock(side_effect=ProcessLookupError())
+        client = await _started_client(mock_proc)
+
+        await client.quit()
+
+        mock_proc.kill.assert_called_once()
+        mock_proc.wait.assert_awaited_once()
+        assert not client.is_running
+
+    @pytest.mark.asyncio
+    async def test_an_engine_that_exits_within_its_grace_isnt_killed(self) -> None:
+        """The engine has 5 s to exit after ``quit``; one that takes 0.2 s is left to."""
+        mock_proc = _make_mock_process([])
+
+        async def _exit_soon() -> int:
+            await asyncio.sleep(0.2)
+            return 0
+
+        mock_proc.wait = AsyncMock(side_effect=_exit_soon)
+        client = await _started_client(mock_proc)
+
+        await client.quit()
+
+        mock_proc.kill.assert_not_called()
+        assert not client.is_running
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_quit_kills_the_engine_and_re_raises(self) -> None:
+        """Cancelled while it waits for the engine to exit, quit() kills the engine first."""
+        mock_proc = _make_mock_process([])
+        waiting = _wait_until_killed(mock_proc)
+        client = await _started_client(mock_proc)
+
+        quitting = asyncio.create_task(client.quit())
+        await asyncio.wait_for(waiting.wait(), timeout=5)
+        quitting.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(quitting, timeout=5)
+        mock_proc.kill.assert_called_once()
+        assert not client.is_running
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_quit_re_raises_even_if_the_engine_has_exited(self) -> None:
+        """The engine can exit while quit() waits, just before the cancellation lands."""
+        mock_proc = _make_mock_process([])
+        waiting = _wait_until_killed(mock_proc)
+        client = await _started_client(mock_proc)
+
+        quitting = asyncio.create_task(client.quit())
+        await asyncio.wait_for(waiting.wait(), timeout=5)
+        mock_proc.returncode = 0
+        quitting.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(quitting, timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_quit_re_raises_even_if_the_engine_is_already_gone(
+        self,
+    ) -> None:
+        """``kill()`` raises ``ProcessLookupError`` once asyncio has finished with the process.
+
+        The cancellation must still propagate. A ``ProcessLookupError`` in its
+        place would be swallowed by the runner's guard around ``quit()``.
+        """
+        mock_proc = _make_mock_process([])
+        waiting = _wait_until_killed(mock_proc, kill_error=ProcessLookupError())
+        client = await _started_client(mock_proc)
+
+        quitting = asyncio.create_task(client.quit())
+        await asyncio.wait_for(waiting.wait(), timeout=5)
+        quitting.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(quitting, timeout=5)
+        mock_proc.kill.assert_called_once()

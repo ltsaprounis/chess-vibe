@@ -7,6 +7,7 @@ commands, response parsing, timeouts, and engine crash detection.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shlex
 import time
@@ -182,6 +183,16 @@ def parse_bestmove(line: str) -> BestMove:
     return BestMove(move=move, ponder=ponder)
 
 
+def _kill(process: asyncio.subprocess.Process) -> None:
+    """SIGKILL an engine process, unless it's already gone.
+
+    asyncio raises ``ProcessLookupError`` once it has finished with a process
+    that has exited.
+    """
+    with contextlib.suppress(ProcessLookupError):
+        process.kill()
+
+
 class UCIClient:
     """Async UCI client for communicating with chess engine subprocesses.
 
@@ -231,18 +242,28 @@ class UCIClient:
             raise UCIEngineError(f"Failed to start engine '{self.engine_path}': {e}") from e
 
     async def quit(self) -> None:
-        """Send quit command and wait for the engine to terminate."""
+        """Tell the engine to quit, and kill it if it doesn't.
+
+        The engine has 5 s to exit after ``quit``. It's killed if it takes
+        longer, or if ``quit`` can't be written to it, as when it has closed
+        its input, and it's reaped before this returns. If this is cancelled
+        while it waits, the engine is killed before the cancellation goes on.
+        """
         if not self.is_running:
             return
 
         assert self._process is not None
+        process = self._process
         try:
             await self._send("quit")
-            await asyncio.wait_for(self._process.wait(), timeout=5.0)
-        except (asyncio.TimeoutError, UCIEngineError):
-            logger.warning("Engine did not quit gracefully, terminating")
-            self._process.kill()
-            await self._process.wait()
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+        except (asyncio.TimeoutError, UCIEngineError, ConnectionError) as e:
+            logger.warning("Engine did not quit gracefully, killing it: %r", e)
+            _kill(process)
+            await process.wait()
+        except asyncio.CancelledError:
+            _kill(process)
+            raise
         finally:
             self._process = None
             logger.info("Engine process terminated")
