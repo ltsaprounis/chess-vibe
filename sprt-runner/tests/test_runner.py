@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import multiprocessing
+import os
 import re
 import shlex
 import signal
 import time
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -44,6 +46,7 @@ from sprt_runner.runner import (
     _drain_results,  # type: ignore[reportPrivateUsage]
     _play_single_game,  # type: ignore[reportPrivateUsage]
     _resolve_run_command,  # type: ignore[reportPrivateUsage]
+    _start_forkserver_ignoring_sighup,  # type: ignore[reportPrivateUsage]
     _terminate_all_workers,  # type: ignore[reportPrivateUsage]
     build_parser,
     format_complete_message,
@@ -59,6 +62,99 @@ from sprt_runner.worktree import EngineSpec, WorktreeError
 
 # Re-export for monkeypatching
 _QUEUE_TIMEOUT_SECONDS = "sprt_runner.runner._QUEUE_TIMEOUT_SECONDS"
+
+
+# Fake workers' pids start here, past any real pid: Linux allows at most
+# 4,194,304, and macOS 99,999. A signal sent to one can't reach a process.
+_FAKE_PID_BASE = 4_200_000
+_REAL_KILL = os.kill
+
+
+@dataclass
+class _ProcessGroups:
+    """The runner's process-group calls, recorded instead of made.
+
+    Attributes:
+        led: The arguments of each ``os.setpgid`` call, in order.
+        sessions_led: How many times ``os.setsid`` was called.
+        killed: The arguments of each ``os.killpg`` call, in order. A signal
+            ``os.kill`` sends to a group (a pid below -1) is recorded here as
+            that group's, and one to the caller's own group or to every
+            process (pid 0 or -1) as given.
+        signalled: Signals ``os.kill`` was asked to send to one process other
+            than this one, recorded instead of sent. Every fake worker's pid is
+            made up, so such a signal could only reach a stranger. The fixture
+            fails the test if there are any.
+        sighup_when_leading: SIGHUP's disposition at each ``os.setpgid`` call.
+        errors: Raised by the next ``os.killpg`` calls, one each, in order.
+        log: When set, each ``os.killpg`` call also adds ``("killpg", pgid)``
+            here, so a test can see it among its workers' own events.
+        forkserver_sighup: SIGHUP's disposition each time the forkserver was
+            started, which is recorded instead.
+    """
+
+    led: list[tuple[int, int]] = field(default_factory=list[tuple[int, int]])
+    sessions_led: int = 0
+    killed: list[tuple[int | None, int]] = field(default_factory=list[tuple[int | None, int]])
+    signalled: list[tuple[int, int]] = field(default_factory=list[tuple[int, int]])
+    sighup_when_leading: list[object] = field(default_factory=list[object])
+    errors: list[OSError] = field(default_factory=list[OSError])
+    log: list[tuple[str, int | None]] | None = None
+    forkserver_sighup: list[object] = field(default_factory=list[object])
+
+    def setpgid(self, pid: int, pgid: int) -> None:
+        self.led.append((pid, pgid))
+        self.sighup_when_leading.append(signal.getsignal(signal.SIGHUP))
+
+    def setsid(self) -> int:
+        self.sessions_led += 1
+        return 0
+
+    def killpg(self, pgid: int | None, sig: int) -> None:
+        self.killed.append((pgid, sig))
+        if self.log is not None:
+            self.log.append(("killpg", pgid))
+        if self.errors:
+            raise self.errors.pop(0)
+
+    def kill(self, pid: int, sig: int) -> None:
+        if pid == os.getpid():
+            _REAL_KILL(pid, sig)
+        elif pid > 0:
+            self.signalled.append((pid, sig))
+        else:
+            self.killpg(-pid if pid < -1 else pid, sig)
+
+    def ensure_forkserver(self) -> None:
+        self.forkserver_sighup.append(signal.getsignal(signal.SIGHUP))
+        if self.log is not None:
+            self.log.append(("forkserver", None))
+
+
+@pytest.fixture(autouse=True)
+def process_groups(monkeypatch: pytest.MonkeyPatch) -> Iterator[_ProcessGroups]:
+    """Record the runner's process-group calls instead of making them.
+
+    The fake workers' pids are made up, so a real group kill could reach an
+    unrelated process group. ``worker_entry``, which some tests run in this
+    process, would move pytest out of its own group or session and change how
+    it handles SIGTTOU and SIGHUP, and ``main()`` would start a real
+    forkserver. Only a signal ``os.kill`` sends to this process goes through,
+    so a test can signal itself; one aimed at any other process fails the
+    test.
+    """
+    groups = _ProcessGroups()
+    monkeypatch.setattr(os, "setpgid", groups.setpgid)
+    monkeypatch.setattr(os, "setsid", groups.setsid)
+    monkeypatch.setattr(os, "killpg", groups.killpg)
+    monkeypatch.setattr(os, "kill", groups.kill)
+    monkeypatch.setattr("multiprocessing.forkserver.ensure_running", groups.ensure_forkserver)
+    dispositions = {sig: signal.getsignal(sig) for sig in (signal.SIGTTOU, signal.SIGHUP)}
+    yield groups
+    for sig, handler in dispositions.items():
+        if handler is not None:
+            signal.signal(sig, handler)
+    assert groups.signalled == [], f"signalled processes the test didn't start: {groups.signalled}"
 
 
 class TestParseTimeControl:
@@ -464,6 +560,58 @@ class TestWorkerEntry:
         assert seen["sigint"] is not signal.default_int_handler
         assert seen["sigint_after"] is signal.default_int_handler
 
+    def test_worker_leads_its_own_process_group_before_playing(
+        self, monkeypatch: pytest.MonkeyPatch, process_groups: _ProcessGroups
+    ) -> None:
+        """The engines a worker starts join its group, for the coordinator to kill (#209).
+
+        The worker leads the group before its game starts an engine. Out of the
+        terminal's foreground group, it ignores SIGTTOU, which a terminal set to
+        ``stty tostop`` would otherwise stop it with the first time it logs. It
+        puts SIGHUP back to its default, since the forkserver it comes from
+        ignores it, but only once it has left the runner's group, which a
+        terminal's hangup reaches.
+        """
+        seen: dict[str, object] = {}
+
+        async def _record(task: WorkerTask) -> WorkerResult:
+            seen["led"] = list(process_groups.led)
+            seen["sigttou"] = signal.getsignal(signal.SIGTTOU)
+            seen["sighup"] = signal.getsignal(signal.SIGHUP)
+            return WorkerResult(
+                game_id=task.game_id,
+                result=GameResult.DRAW,
+                termination="stalemate",
+                move_count=0,
+                swap_colors=task.swap_colors,
+            )
+
+        monkeypatch.setattr("sprt_runner.runner._play_single_game", _record)
+        task = WorkerTask(
+            game_id="group",
+            white_cmd="engine",
+            black_cmd="engine",
+            game_config=GameConfig(time_control=DepthTimeControl(depth=1)),
+            swap_colors=False,
+            white_label="base engine eng1",
+            black_label="test engine eng2",
+        )
+        result_queue: multiprocessing.Queue[WorkerResult] = multiprocessing.Queue()
+        old_sigterm = signal.getsignal(signal.SIGTERM)
+        old_sigint = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        try:
+            worker_entry(task, result_queue)
+            assert result_queue.get(timeout=5).game_id == "group"
+        finally:
+            signal.signal(signal.SIGTERM, old_sigterm)
+            signal.signal(signal.SIGINT, old_sigint)
+            result_queue.close()
+            result_queue.join_thread()
+
+        assert seen == {"led": [(0, 0)], "sigttou": signal.SIG_IGN, "sighup": signal.SIG_DFL}
+        assert process_groups.sighup_when_leading == [signal.SIG_IGN]
+
 
 class TestWorkerLogging:
     """A worker sets up logging like the runner, since forkserver and spawn don't pass it on."""
@@ -540,8 +688,8 @@ class _Startup:
         unlaunchable: The engine's command can't be launched at all.
         hangs: The engine never answers ``uci``, whatever the limit.
         error: An exception ``uci`` raises instead of answering.
-        quit_raises: ``quit`` raises, as the real client's does when it
-            writes ``quit`` into a pipe that's already broken.
+        quit_raises: ``quit`` raises, as nothing in the real client is known
+            to since #209, so that the guard around it is what's tested.
         quit_hangs: ``quit`` never returns.
     """
 
@@ -553,6 +701,10 @@ class _Startup:
     error: Exception | None = None
     quit_raises: bool = False
     quit_hangs: bool = False
+
+
+class _UnforeseenQuitError(Exception):
+    """Something ``quit()`` isn't known to raise, of no particular kind."""
 
 
 class _StartupFakeClient:
@@ -604,7 +756,7 @@ class _StartupFakeClient:
     async def quit(self) -> None:
         self.quit_called = True
         if self.startup.quit_raises:
-            raise ConnectionResetError("Connection lost")
+            raise _UnforeseenQuitError("quit failed")
         if self.startup.quit_hangs:
             self.quitting = True
             await asyncio.Event().wait()
@@ -828,10 +980,12 @@ class TestEngineStartup:
         error: str | None,
         label: str,
     ) -> None:
-        """Quitting an engine whose pipe is already broken raises in the real client.
+        """Should ``quit()`` raise, the game's result still comes back.
 
-        The game's result still comes back, the other engine is still told
-        to quit, and a warning with the traceback names the engine.
+        The real client kills an engine it can't tell to quit rather than
+        raise (#209), so this guards against anything else. The other engine
+        is still told to quit, and a warning with the traceback names the
+        engine.
         """
         outcome = await _start_game(monkeypatch, white, black)
 
@@ -846,7 +1000,7 @@ class TestEngineStartup:
             f"Couldn't tell the {label} to quit"
         ]
         assert warnings[0].exc_info is not None
-        assert warnings[0].exc_info[0] is ConnectionResetError
+        assert warnings[0].exc_info[0] is _UnforeseenQuitError
 
     @pytest.mark.asyncio
     async def test_cancelling_a_game_while_it_quits_an_engine_propagates(
@@ -953,7 +1107,7 @@ class _FakeProcess:
     """
 
     captured_tasks: ClassVar[list[WorkerTask]] = []
-    _next_pid: ClassVar[int] = 7000
+    _next_pid: ClassVar[int] = _FAKE_PID_BASE + 7000
 
     def __init__(
         self,
@@ -1121,7 +1275,7 @@ class _FakeProcessWithMoves:
     """Fake process that includes moves in WorkerResult for game persistence tests."""
 
     captured_tasks: ClassVar[list[WorkerTask]] = []
-    _next_pid: ClassVar[int] = 9000
+    _next_pid: ClassVar[int] = _FAKE_PID_BASE + 9000
 
     _test_moves: ClassVar[list[Move]] = [
         Move(
@@ -1304,7 +1458,7 @@ class _SlowFakeProcess:
     """
 
     captured_tasks: ClassVar[list[WorkerTask]] = []
-    _next_pid: ClassVar[int] = 6000
+    _next_pid: ClassVar[int] = _FAKE_PID_BASE + 6000
 
     def __init__(
         self,
@@ -1435,7 +1589,7 @@ class _DeadFakeProcess:
     """
 
     captured_tasks: ClassVar[list[WorkerTask]] = []
-    next_pid: ClassVar[int] = 9000
+    next_pid: ClassVar[int] = _FAKE_PID_BASE + 9000
 
     def __init__(
         self,
@@ -1479,7 +1633,7 @@ class TestDeadWorkerErrorReporting:
         """When a worker dies without producing a result, an error identifying
         the game ID is emitted to stdout."""
         _DeadFakeProcess.captured_tasks = []
-        _DeadFakeProcess.next_pid = 9000
+        _DeadFakeProcess.next_pid = _FAKE_PID_BASE + 9000
 
         async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
             return "engine_cmd", Path("/fake/dir")
@@ -1542,7 +1696,7 @@ class TestDeadWorkerErrorReporting:
             captured_tasks: ClassVar[list[WorkerTask]] = []
             instances: ClassVar[list[_SomeDieFakeProcess]] = []
             call_count: ClassVar[int] = 0
-            next_pid: ClassVar[int] = 8000
+            next_pid: ClassVar[int] = _FAKE_PID_BASE + 8000
 
             def __init__(
                 self,
@@ -1608,7 +1762,7 @@ class TestDeadWorkerErrorReporting:
         launched after them.
         """
         _DeadFakeProcess.captured_tasks = []
-        _DeadFakeProcess.next_pid = 9000
+        _DeadFakeProcess.next_pid = _FAKE_PID_BASE + 9000
         _patch_engines(monkeypatch, _DeadFakeProcess)
 
         messages = await _run_to_fatal_stop(_quick_config(concurrency=2), 2.0, monkeypatch, capsys)
@@ -1617,8 +1771,8 @@ class TestDeadWorkerErrorReporting:
         tasks = _DeadFakeProcess.captured_tasks
         assert len(tasks) == 2
         assert errors == [
-            f"Worker for game {tasks[0].game_id} died unexpectedly (pid=9000)",
-            f"Worker for game {tasks[1].game_id} died unexpectedly (pid=9001)",
+            f"Worker for game {tasks[0].game_id} died unexpectedly (pid={_FAKE_PID_BASE + 9000})",
+            f"Worker for game {tasks[1].game_id} died unexpectedly (pid={_FAKE_PID_BASE + 9001})",
             "Aborting after 2 worker deaths in a row with no result",
         ]
         assert [m for m in messages if m["type"] == "game_result"] == []
@@ -1743,6 +1897,272 @@ class TestDeadWorkerErrorReporting:
         assert len([e for e in errors if "died unexpectedly" in e]) == 2
         assert any("engine failed to start" in e for e in errors)
         assert len([m for m in messages if m["type"] == "complete"]) == 1
+
+
+class TestWorkerGroupsAreKilled:
+    """Each worker's engines are in its process group, which the coordinator kills (#209).
+
+    An engine that never reads its input again would otherwise outlive its
+    worker. The fakes' pids stand for their groups, and the autouse
+    ``process_groups`` fixture records the kills.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_dead_workers_group_is_killed_when_the_death_is_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        process_groups: _ProcessGroups,
+    ) -> None:
+        """The run goes on to a decision after one death.
+
+        The dead worker isn't among those terminated when the run ends, so its
+        group has to go when its death is found.
+        """
+        _ScriptedFakeProcess.reset(["die"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=2), 5.0, monkeypatch)
+
+        dead = _ScriptedFakeProcess.instances[0]
+        assert (dead.pid, signal.SIGKILL) in process_groups.killed
+
+    @pytest.mark.asyncio
+    async def test_every_dead_workers_group_is_killed_when_deaths_share_a_poll(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        process_groups: _ProcessGroups,
+    ) -> None:
+        """Two of three workers die before the first poll, which finds both.
+
+        Two deaths are short of a full round at three workers, so the run goes
+        on to a decision.
+        """
+        _ScriptedFakeProcess.reset(["play_forever", "die", "die"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=3), 5.0, monkeypatch)
+
+        killed = {pgid for pgid, sig in process_groups.killed if sig == signal.SIGKILL}
+        assert {p.pid for p in _ScriptedFakeProcess.instances[1:3]} <= killed
+
+    @pytest.mark.asyncio
+    async def test_dead_workers_groups_are_killed_when_their_deaths_stop_the_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        process_groups: _ProcessGroups,
+    ) -> None:
+        """Both dead workers' groups go, and so does the group of the worker still playing."""
+        _ScriptedFakeProcess.reset(["play_forever", "die", "die"])
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_to_fatal_stop(_quick_config(concurrency=2), 5.0, monkeypatch, capsys)
+
+        killed = {pgid for pgid, sig in process_groups.killed if sig == signal.SIGKILL}
+        assert {p.pid for p in _ScriptedFakeProcess.instances} <= killed
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("script", "fatal"),
+        [(["play_forever"], False), (["play_forever", "error", "error"], True)],
+        ids=["decision", "fatal_stop"],
+    )
+    async def test_a_worker_still_playing_has_its_group_killed_when_the_run_ends(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        process_groups: _ProcessGroups,
+        script: list[str],
+        fatal: bool,
+    ) -> None:
+        _ScriptedFakeProcess.reset(script)
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        if fatal:
+            await _run_to_fatal_stop(_quick_config(concurrency=2), 5.0, monkeypatch, capsys)
+        else:
+            await _run_within(_quick_config(concurrency=2), 5.0, monkeypatch)
+
+        playing = _ScriptedFakeProcess.instances[0]
+        assert (playing.pid, signal.SIGKILL) in process_groups.killed
+
+    @pytest.mark.asyncio
+    async def test_a_worker_that_finished_its_game_has_its_group_left_alone(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        process_groups: _ProcessGroups,
+    ) -> None:
+        """Each worker delivers, exits and is reaped before the next starts.
+
+        At one worker, nothing is left running when the run decides, so no
+        group is killed at all. The user declined killing a finished worker's
+        group as it's reaped (2026-11-12): its engines have been told to quit.
+        """
+        _ScriptedFakeProcess.reset([], default="deliver_and_exit")
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        await _run_within(_quick_config(concurrency=1), 10.0, monkeypatch)
+
+        assert len(_ScriptedFakeProcess.instances) > 1
+        assert all(p.joined for p in _ScriptedFakeProcess.instances)
+        assert process_groups.killed == []
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_run_kills_the_groups_of_workers_still_playing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        process_groups: _ProcessGroups,
+    ) -> None:
+        _ScriptedFakeProcess.reset([], default="play_forever")
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+        run = asyncio.create_task(run_sprt(_quick_config(concurrency=2)))
+        deadline = time.monotonic() + 5
+        while len(_ScriptedFakeProcess.instances) < 2:
+            assert time.monotonic() < deadline, "the run didn't start two workers within 5 s"
+            await asyncio.sleep(0.01)
+        run.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run, timeout=5)
+        killed = {pgid for pgid, sig in process_groups.killed if sig == signal.SIGKILL}
+        assert {p.pid for p in _ScriptedFakeProcess.instances} <= killed
+
+
+class TestHangup:
+    """SIGHUP cancels a run as SIGTERM does, unless the run started out ignoring it (#209).
+
+    A terminal that hangs up sends SIGHUP to its foreground process group,
+    which no longer holds the workers. Without a handler, the runner would die
+    without its cleanup and leave every worker to play out its game. A test
+    sends SIGHUP only once it has checked the signal is handled or ignored,
+    so a run that doesn't handle it fails the test instead of killing pytest.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("before", ["default", "handler"])
+    async def test_sighup_cancels_the_run_and_ends_its_workers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        process_groups: _ProcessGroups,
+        before: str,
+    ) -> None:
+        """Both workers are still playing when the hangup arrives.
+
+        The run starts from SIGHUP's default, as the CLI does, or from a
+        handler its caller installed, which it takes over as well. While it
+        cleans up, SIGHUP is still handled, so a second hangup, as a shell and
+        then the kernel can send, doesn't kill it halfway.
+        """
+        received: list[int] = []
+
+        def _record(signum: int, frame: object) -> None:
+            received.append(signum)
+
+        during_cleanup: list[object] = []
+
+        def _spy(workers: list[multiprocessing.Process]) -> None:
+            during_cleanup.append(signal.getsignal(signal.SIGHUP))
+            _terminate_all_workers(workers)
+
+        monkeypatch.setattr("sprt_runner.runner._terminate_all_workers", _spy)
+        old_sighup = signal.signal(
+            signal.SIGHUP, _record if before == "handler" else signal.SIG_DFL
+        )
+        _ScriptedFakeProcess.reset([], default="play_forever")
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        run = asyncio.create_task(run_sprt(_quick_config(concurrency=2)))
+        try:
+            deadline = time.monotonic() + 5
+            while len(_ScriptedFakeProcess.instances) < 2:
+                assert time.monotonic() < deadline, "the run didn't start two workers within 5 s"
+                await asyncio.sleep(0.01)
+            assert signal.getsignal(signal.SIGHUP) is not signal.SIG_DFL, (
+                "the run doesn't handle SIGHUP"
+            )
+
+            os.kill(os.getpid(), signal.SIGHUP)
+            done, _ = await asyncio.wait({run}, timeout=5)
+
+            assert done, "the run was still going 5 s after SIGHUP"
+            with pytest.raises(asyncio.CancelledError):
+                await run
+        finally:
+            if not run.done():
+                run.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await run
+            signal.signal(signal.SIGHUP, old_sighup)
+
+        assert received == []
+        assert during_cleanup
+        assert all(handler is not signal.SIG_DFL for handler in during_cleanup)
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+        assert messages[-1]["type"] == "interrupted"
+        killed = {pgid for pgid, sig in process_groups.killed if sig == signal.SIGKILL}
+        assert {p.pid for p in _ScriptedFakeProcess.instances} <= killed
+
+    @pytest.mark.asyncio
+    async def test_a_run_started_ignoring_sighup_plays_on_through_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """As under nohup: SIGHUP stays ignored, so a hangup changes nothing.
+
+        SIGTERM is still handled. The hangup is sent only while it's still
+        ignored and the run is still going, so a run that took SIGHUP over
+        fails here instead of killing pytest with it.
+        """
+        old_sighup = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        sigterm_before = signal.getsignal(signal.SIGTERM)
+        _ScriptedFakeProcess.reset([], default="play_forever")
+        _patch_engines(monkeypatch, _ScriptedFakeProcess)
+        run = asyncio.create_task(run_sprt(_quick_config(concurrency=2)))
+        try:
+            deadline = time.monotonic() + 5
+            while len(_ScriptedFakeProcess.instances) < 2:
+                assert time.monotonic() < deadline, "the run didn't start two workers within 5 s"
+                await asyncio.sleep(0.01)
+            assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+            assert signal.getsignal(signal.SIGTERM) is not sigterm_before, (
+                "the run doesn't handle SIGTERM"
+            )
+
+            os.kill(os.getpid(), signal.SIGHUP)
+            await asyncio.sleep(0.2)
+
+            assert not run.done()
+        finally:
+            if not run.done():
+                run.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await run
+            after = signal.getsignal(signal.SIGHUP)
+            signal.signal(signal.SIGHUP, old_sighup)
+        assert after is signal.SIG_IGN
+
+    @pytest.mark.asyncio
+    async def test_a_finished_run_leaves_no_signal_handler_behind(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No SIGTERM or SIGHUP handler is left on the caller's loop.
+
+        SIGHUP is back at its default, where asyncio leaves a signal it
+        handled, rather than ignored.
+        """
+        old_sighup = signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        try:
+            _ScriptedFakeProcess.reset([])
+            _patch_engines(monkeypatch, _ScriptedFakeProcess)
+
+            await _run_within(_quick_config(concurrency=1), 10.0, monkeypatch)
+
+            loop = asyncio.get_running_loop()
+            assert loop.remove_signal_handler(signal.SIGTERM) is False
+            assert loop.remove_signal_handler(signal.SIGHUP) is False
+            assert signal.getsignal(signal.SIGHUP) is signal.SIG_DFL
+        finally:
+            signal.signal(signal.SIGHUP, old_sighup)
 
 
 class TestFailedGames:
@@ -1991,7 +2411,7 @@ class _QueueErrorFakeProcess:
     the configured exception on ``get()``.
     """
 
-    next_pid: ClassVar[int] = 11000
+    next_pid: ClassVar[int] = _FAKE_PID_BASE + 11000
     exception_to_raise: ClassVar[type[BaseException]] = EOFError
 
     def __init__(
@@ -2075,7 +2495,7 @@ class TestQueueExceptionHandling:
         """queue.Empty from a timed-out get() should enter the
         dead-worker detection path and not abort immediately."""
         _DeadFakeProcess.captured_tasks = []
-        _DeadFakeProcess.next_pid = 9000
+        _DeadFakeProcess.next_pid = _FAKE_PID_BASE + 9000
 
         async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
             return "engine_cmd", Path("/fake/dir")
@@ -2110,7 +2530,7 @@ class TestQueueExceptionHandling:
     ) -> None:
         """Non-Empty exceptions (e.g. EOFError) must not be silently
         swallowed.  They should be logged and cause the run to abort."""
-        _QueueErrorFakeProcess.next_pid = 11000
+        _QueueErrorFakeProcess.next_pid = _FAKE_PID_BASE + 11000
         _QueueErrorFakeProcess.exception_to_raise = EOFError
 
         async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
@@ -2144,7 +2564,7 @@ class TestQueueExceptionHandling:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """OSError on queue.get() must also be treated as fatal."""
-        _QueueErrorFakeProcess.next_pid = 11000
+        _QueueErrorFakeProcess.next_pid = _FAKE_PID_BASE + 11000
         _QueueErrorFakeProcess.exception_to_raise = OSError
 
         async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
@@ -2391,7 +2811,7 @@ class _LingeringFakeProcess:
     """
 
     instances: ClassVar[list[_LingeringFakeProcess]] = []
-    next_pid: ClassVar[int] = 15000
+    next_pid: ClassVar[int] = _FAKE_PID_BASE + 15000
 
     def __init__(
         self,
@@ -2437,7 +2857,7 @@ class _BusyThenFastFakeProcess:
     busy_slots: ClassVar[int] = 3
     created: ClassVar[int] = 0
     instances: ClassVar[list[_BusyThenFastFakeProcess]] = []
-    next_pid: ClassVar[int] = 16000
+    next_pid: ClassVar[int] = _FAKE_PID_BASE + 16000
 
     def __init__(
         self,
@@ -2489,7 +2909,7 @@ class _ExitingFakeProcess:
 
     instances: ClassVar[list[_ExitingFakeProcess]] = []
     unreaped_at_launch: ClassVar[list[int]] = []
-    next_pid: ClassVar[int] = 17000
+    next_pid: ClassVar[int] = _FAKE_PID_BASE + 17000
 
     def __init__(
         self,
@@ -2567,7 +2987,7 @@ class _ScriptedFakeProcess:
     error: ClassVar[str] = "engine failed to start"
     outcomes: ClassVar[list[tuple[GameResult, str | None]]] = []
     instances: ClassVar[list[_ScriptedFakeProcess]] = []
-    next_pid: ClassVar[int] = 19000
+    next_pid: ClassVar[int] = _FAKE_PID_BASE
 
     def __init__(
         self,
@@ -3189,8 +3609,9 @@ class TestGameLimits:
     ) -> None:
         """The refusal comes before anything else ``run_sprt`` does.
 
-        So no SIGTERM handler is left on the caller's loop, no engine is
-        resolved or built, and no worktree is removed for the commit specs.
+        So no SIGTERM or SIGHUP handler is left on the caller's loop, no
+        engine is resolved or built, and no worktree is removed for the commit
+        specs.
         """
         resolved: list[object] = []
         removed: list[Path] = []
@@ -3213,7 +3634,9 @@ class TestGameLimits:
         with pytest.raises(ValueError, match="early_stop=False requires max_games"):
             await asyncio.wait_for(run_sprt(config), timeout=3.0)
 
-        assert asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM) is False
+        loop = asyncio.get_running_loop()
+        assert loop.remove_signal_handler(signal.SIGTERM) is False
+        assert loop.remove_signal_handler(signal.SIGHUP) is False
         assert (resolved, removed, _ScriptedFakeProcess.instances) == ([], [], [])
 
     @pytest.mark.asyncio
@@ -3785,11 +4208,20 @@ class TestMainStartMethod:
     the multi-threaded coordinator. With ``sprt_runner.runner`` preloaded it
     starts about as fast as a fork, where spawn is markedly slower. main()
     only chooses when nothing else has, and only where forkserver exists.
+    When it chooses, it starts the forkserver itself, with SIGHUP ignored, so
+    that the forkserver and its resource tracker outlive a terminal's hangup
+    and the runner can clean up after it (#209).
     """
 
     @staticmethod
-    def _run_main(monkeypatch: pytest.MonkeyPatch) -> tuple[str | None, list[list[str]]]:
-        """Run main() and return the start method run_sprt saw, and every preload set."""
+    def _run_main(
+        monkeypatch: pytest.MonkeyPatch, events: list[tuple[str, int | None]] | None = None
+    ) -> tuple[str | None, list[list[str]]]:
+        """Run main() and return the start method run_sprt saw, and every preload set.
+
+        Each preload set is also added to ``events``, if given, as
+        ``("preload", None)``.
+        """
         seen: dict[str, str | None] = {}
         preloads: list[list[str]] = []
 
@@ -3798,6 +4230,8 @@ class TestMainStartMethod:
 
         def _record_preload(modules: list[str]) -> None:
             preloads.append(list(modules))
+            if events is not None:
+                events.append(("preload", None))
 
         monkeypatch.setattr("sprt_runner.runner.run_sprt", _fake_run_sprt)
         # Every public way to set the preload ends in this function.
@@ -3808,30 +4242,78 @@ class TestMainStartMethod:
 
         return seen["method"], preloads
 
-    def test_chooses_a_preloaded_forkserver(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        "sighup", [signal.SIG_DFL, signal.SIG_IGN], ids=["sighup_default", "sighup_ignored"]
+    )
+    def test_chooses_a_preloaded_forkserver_started_ignoring_sighup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        process_groups: _ProcessGroups,
+        sighup: signal.Handlers,
+    ) -> None:
+        """SIGHUP is ignored while the forkserver starts, then as it was before."""
         if "forkserver" not in multiprocessing.get_all_start_methods():
             pytest.skip("forkserver isn't available on this platform")
         multiprocessing.set_start_method(None, force=True)
+        signal.signal(signal.SIGHUP, sighup)
 
         method, preloads = self._run_main(monkeypatch)
 
         assert method == "forkserver"
         assert preloads == [["sprt_runner.runner"]]
+        assert process_groups.forkserver_sighup == [signal.SIG_IGN]
+        assert signal.getsignal(signal.SIGHUP) is sighup
+
+    def test_sets_the_preload_before_it_starts_the_forkserver(
+        self, monkeypatch: pytest.MonkeyPatch, process_groups: _ProcessGroups
+    ) -> None:
+        """The forkserver takes its preload as it starts, so a later one would be lost."""
+        if "forkserver" not in multiprocessing.get_all_start_methods():
+            pytest.skip("forkserver isn't available on this platform")
+        multiprocessing.set_start_method(None, force=True)
+        events: list[tuple[str, int | None]] = []
+        process_groups.log = events
+
+        self._run_main(monkeypatch, events)
+
+        assert events == [("preload", None), ("forkserver", None)]
+
+    @pytest.mark.parametrize(
+        "sighup", [signal.SIG_DFL, signal.SIG_IGN], ids=["sighup_default", "sighup_ignored"]
+    )
+    def test_puts_sighup_back_even_if_the_forkserver_fails_to_start(
+        self, monkeypatch: pytest.MonkeyPatch, sighup: signal.Handlers
+    ) -> None:
+        def _fail() -> None:
+            raise OSError("no forkserver")
+
+        monkeypatch.setattr("multiprocessing.forkserver.ensure_running", _fail)
+        signal.signal(signal.SIGHUP, sighup)
+
+        with pytest.raises(OSError, match="no forkserver"):
+            _start_forkserver_ignoring_sighup()
+
+        assert signal.getsignal(signal.SIGHUP) is sighup
 
     @pytest.mark.parametrize("chosen", multiprocessing.get_all_start_methods())
     def test_keeps_a_start_method_already_chosen(
-        self, monkeypatch: pytest.MonkeyPatch, chosen: str
+        self, monkeypatch: pytest.MonkeyPatch, process_groups: _ProcessGroups, chosen: str
     ) -> None:
-        """Whatever the caller chose, fork and forkserver included, stays, with no preload."""
+        """Whatever the caller chose, fork and forkserver included, stays, with no preload.
+
+        main() doesn't start a forkserver either: the caller's choice decides
+        when one starts.
+        """
         multiprocessing.set_start_method(chosen, force=True)
 
         method, preloads = self._run_main(monkeypatch)
 
         assert method == chosen
         assert preloads == []
+        assert process_groups.forkserver_sighup == []
 
     def test_keeps_the_default_where_forkserver_is_missing(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, process_groups: _ProcessGroups
     ) -> None:
         multiprocessing.set_start_method(None, force=True)
         monkeypatch.setattr(
@@ -3842,6 +4324,7 @@ class TestMainStartMethod:
 
         assert method is None
         assert preloads == []
+        assert process_groups.forkserver_sighup == []
 
 
 class TestMainExitCodes:
@@ -4202,7 +4685,7 @@ class _StubbornFakeProcess:
     """
 
     captured_tasks: ClassVar[list[WorkerTask]] = []
-    next_pid: ClassVar[int] = 11000
+    next_pid: ClassVar[int] = _FAKE_PID_BASE + 11000
     kill_called: ClassVar[list[int]] = []
 
     def __init__(
@@ -4260,7 +4743,7 @@ class TestSigkillFallback:
         """When a worker stays alive after terminate()+join(), kill() is called
         and a warning is logged."""
         _StubbornFakeProcess.captured_tasks = []
-        _StubbornFakeProcess.next_pid = 11000
+        _StubbornFakeProcess.next_pid = _FAKE_PID_BASE + 11000
         _StubbornFakeProcess.kill_called = []
 
         async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
@@ -4303,7 +4786,7 @@ class TestSigkillFallback:
         class _PromptFakeProcess(_FakeProcess):
             """_FakeProcess with kill() tracking."""
 
-            next_pid: ClassVar[int] = 7000
+            next_pid: ClassVar[int] = _FAKE_PID_BASE + 7000
 
             def __init__(
                 self,
@@ -4330,7 +4813,7 @@ class TestSigkillFallback:
                 kill_called.append(self._pid)
 
         _PromptFakeProcess.captured_tasks = []
-        _PromptFakeProcess.next_pid = 7000
+        _PromptFakeProcess.next_pid = _FAKE_PID_BASE + 7000
 
         async def _mock_resolve(spec: object, *, repo_root: Path) -> tuple[str, Path]:
             return "engine_cmd", Path("/fake/dir")
@@ -4409,7 +4892,7 @@ class TestTerminateAllWorkers:
     def test_kills_stubborn_worker(self) -> None:
         """Workers that ignore SIGTERM get SIGKILL."""
         w = MagicMock(spec=multiprocessing.Process)
-        w.pid = 42
+        w.pid = _FAKE_PID_BASE - 3
         w.is_alive.return_value = True  # stays alive after terminate
 
         _terminate_all_workers([w])
@@ -4422,6 +4905,133 @@ class TestTerminateAllWorkers:
     def test_empty_list_is_noop(self) -> None:
         """Terminating an empty list does nothing."""
         _terminate_all_workers([])  # Should not raise
+
+    def test_kills_each_workers_group_once_the_worker_has_exited(
+        self, process_groups: _ProcessGroups
+    ) -> None:
+        """A worker's engines are in its group and can outlive it, so the group is killed (#209).
+
+        It's killed after the worker has exited, when the worker can no longer
+        start an engine.
+        """
+        events: list[tuple[str, int | None]] = []
+        process_groups.log = events
+        workers = [_RecordedWorker(pid, events) for pid in (_PID_A, _PID_B)]
+
+        _terminate_all_workers(cast("list[multiprocessing.Process]", workers))
+
+        assert events == [
+            *(("terminate", _PID_A), ("join", _PID_A), ("killpg", _PID_A)),
+            *(("terminate", _PID_B), ("join", _PID_B), ("killpg", _PID_B)),
+        ]
+        assert process_groups.killed == [(_PID_A, signal.SIGKILL), (_PID_B, signal.SIGKILL)]
+
+    def test_kills_a_stubborn_workers_group_once_sigkill_has_ended_it(
+        self, process_groups: _ProcessGroups
+    ) -> None:
+        events: list[tuple[str, int | None]] = []
+        process_groups.log = events
+        worker = _RecordedWorker(_PID_A, events, ignores_sigterm=True)
+
+        _terminate_all_workers(cast("list[multiprocessing.Process]", [worker]))
+
+        assert events == [
+            *(("terminate", _PID_A), ("join", _PID_A)),
+            *(("kill", _PID_A), ("join", _PID_A), ("killpg", _PID_A)),
+        ]
+
+    def test_kills_the_group_of_a_worker_still_alive_after_sigkill(
+        self, process_groups: _ProcessGroups
+    ) -> None:
+        """Its engines can still be killed, though the worker hasn't exited yet."""
+        events: list[tuple[str, int | None]] = []
+        process_groups.log = events
+        worker = _RecordedWorker(_PID_A, events, ignores_sigterm=True, survives_sigkill=True)
+
+        _terminate_all_workers(cast("list[multiprocessing.Process]", [worker]))
+
+        assert events == [
+            *(("terminate", _PID_A), ("join", _PID_A)),
+            *(("kill", _PID_A), ("join", _PID_A), ("killpg", _PID_A)),
+        ]
+
+    @pytest.mark.parametrize(
+        "error",
+        [ProcessLookupError(), PermissionError()],
+        ids=["empty_group", "only_a_zombie_left"],
+    )
+    def test_a_group_with_no_engine_left_doesnt_stop_the_cleanup(
+        self, process_groups: _ProcessGroups, error: OSError
+    ) -> None:
+        """Killing an empty group raises ``ProcessLookupError``.
+
+        On macOS, a group whose only process is an unreaped zombie raises
+        ``PermissionError`` instead, as the worker can be for a moment.
+        """
+        events: list[tuple[str, int | None]] = []
+        process_groups.log = events
+        process_groups.errors = [error]
+        workers = [_RecordedWorker(pid, events) for pid in (_PID_A, _PID_B)]
+
+        _terminate_all_workers(cast("list[multiprocessing.Process]", workers))
+
+        assert events == [
+            *(("terminate", _PID_A), ("join", _PID_A), ("killpg", _PID_A)),
+            *(("terminate", _PID_B), ("join", _PID_B), ("killpg", _PID_B)),
+        ]
+
+    def test_a_worker_that_never_started_has_no_group_to_kill(
+        self, process_groups: _ProcessGroups
+    ) -> None:
+        events: list[tuple[str, int | None]] = []
+        worker = _RecordedWorker(None, events)
+
+        _terminate_all_workers(cast("list[multiprocessing.Process]", [worker]))
+
+        assert process_groups.killed == []
+
+
+_PID_A = _FAKE_PID_BASE - 2
+_PID_B = _FAKE_PID_BASE - 1
+
+
+class _RecordedWorker:
+    """A worker that logs what's done to it into a list it shares with the test.
+
+    It exits on ``terminate()``, unless it ignores SIGTERM, and on ``kill()``,
+    unless it survives SIGKILL for a while, as a process in uninterruptible
+    sleep does.
+    """
+
+    def __init__(
+        self,
+        pid: int | None,
+        events: list[tuple[str, int | None]],
+        *,
+        ignores_sigterm: bool = False,
+        survives_sigkill: bool = False,
+    ) -> None:
+        self.pid = pid
+        self._events = events
+        self._ignores_sigterm = ignores_sigterm
+        self._survives_sigkill = survives_sigkill
+        self._alive = True
+
+    def terminate(self) -> None:
+        self._events.append(("terminate", self.pid))
+        if not self._ignores_sigterm:
+            self._alive = False
+
+    def kill(self) -> None:
+        self._events.append(("kill", self.pid))
+        if not self._survives_sigkill:
+            self._alive = False
+
+    def join(self, timeout: float | None = None) -> None:
+        self._events.append(("join", self.pid))
+
+    def is_alive(self) -> bool:
+        return self._alive
 
 
 # ---------------------------------------------------------------------------
@@ -4440,7 +5050,7 @@ class _InterruptibleFakeProcess:
     interrupt_after: ClassVar[int] = 2
     terminate_called: ClassVar[list[int]] = []
     kill_called: ClassVar[list[int]] = []
-    next_pid: ClassVar[int] = 12000
+    next_pid: ClassVar[int] = _FAKE_PID_BASE + 12000
 
     def __init__(
         self,
@@ -4503,7 +5113,7 @@ class TestGracefulShutdown:
         _InterruptibleFakeProcess.interrupt_after = 2
         _InterruptibleFakeProcess.terminate_called = []
         _InterruptibleFakeProcess.kill_called = []
-        _InterruptibleFakeProcess.next_pid = 12000
+        _InterruptibleFakeProcess.next_pid = _FAKE_PID_BASE + 12000
 
     @pytest.mark.asyncio
     async def test_cancel_terminates_remaining_workers(
@@ -4536,8 +5146,8 @@ class TestGracefulShutdown:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        # The third worker (pid=12002) should have been terminated
-        assert 12002 in _InterruptibleFakeProcess.terminate_called
+        # The third worker should have been terminated
+        assert _FAKE_PID_BASE + 12002 in _InterruptibleFakeProcess.terminate_called
 
     @pytest.mark.asyncio
     async def test_partial_progress_on_cancel(

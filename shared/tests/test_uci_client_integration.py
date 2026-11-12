@@ -7,10 +7,18 @@ so they can be run or skipped separately.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import os
+import shlex
+import signal
+import time
+from pathlib import Path
+
 import chess
 import pytest
 from shared.time_control import DepthTimeControl
-from shared.uci_client import UCIClient
+from shared.uci_client import UCIClient, UCIEngineError
 
 pytestmark = pytest.mark.integration
 
@@ -112,3 +120,53 @@ async def test_engine_command_with_shlex_split(random_engine_command: str) -> No
         await client.isready()
     finally:
         await client.quit()
+
+
+def _process_exists(pid: int) -> bool:
+    """Return True while ``pid`` is running or hasn't been reaped."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.asyncio
+async def test_quit_kills_an_engine_that_closed_its_pipes(tmp_path: Path) -> None:
+    """An engine that closed its input and output but still runs is killed and reaped (#209).
+
+    The shell writes its pid, closes stdin and stdout, and becomes ``sleep``.
+    ``quit`` can't be written into its closed input, so quit() kills it at
+    once, without the 5 s it gives an engine to exit, and doesn't raise.
+    """
+    pid_file = tmp_path / "engine.pid"
+    script = f'echo $$ > "{pid_file}"; exec 0<&- 1>&-; exec sleep 60'
+    client = UCIClient(shlex.join(["sh", "-c", script]))
+    await client.start()
+    pid: int | None = None
+    try:
+        deadline = time.monotonic() + 10
+        while not (pid_file.exists() and pid_file.read_text().strip()):
+            assert time.monotonic() < deadline, "the engine didn't write its pid within 10 s"
+            await asyncio.sleep(0.02)
+        pid = int(pid_file.read_text())
+        # Fails one way or the other once the engine has closed its pipes.
+        with pytest.raises((UCIEngineError, ConnectionError)):
+            await client.uci(timeout=10)
+
+        started = time.monotonic()
+        raised: ConnectionError | None = None
+        try:
+            await asyncio.wait_for(client.quit(), timeout=10)
+        except ConnectionError as e:
+            raised = e
+        took = time.monotonic() - started
+
+        assert not _process_exists(pid), "the engine is still running"
+        pid = None  # reaped, so the number may belong to someone else now
+        assert raised is None
+        assert took < 4, f"quit() took {took:.1f} s"
+    finally:
+        if pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)

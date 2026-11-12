@@ -10,9 +10,17 @@ the engine goes back to reading commands without answering. So ``quit`` ends
 even a search scripted never to finish, as it would on a real engine, instead
 of leaving ``UCIClient.quit`` to wait out its 5 s kill timeout.
 
-The engine can also fail to start: it can exit before reading anything, or
-sleep before reading anything, as a slow import would. That sleep isn't cut
-short by input, since an engine still importing can't read its commands.
+The engine can also fail to start: before reading anything it can sleep, as a
+slow import would, and then it can exit. That sleep isn't cut short by input,
+since an engine still importing can't read its commands.
+
+It can also hang. The first engine to create the ``--hang-first`` file writes
+its pid there and skips the startup flags. At its first ``go`` it starts to
+ignore SIGTERM, adds a line saying ``hung``, and sleeps for an hour without
+reading its input, as a search stuck in a loop would. So neither ``quit``, nor
+the end of its input, nor SIGTERM ends it: only SIGKILL does. Every later
+engine first waits, for up to 20 s, until the first has hung, and then
+carries on as its other flags say. So a run can't end before the hang.
 
 Quiet pawn moves are preferred because they cannot repeat a position, which
 keeps a game alive long enough for a scripted time loss to be the thing that
@@ -24,6 +32,7 @@ from __future__ import annotations
 import argparse
 import os
 import select
+import signal
 import sys
 import time
 from pathlib import Path
@@ -45,7 +54,36 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--startup-delay-ms", type=int, default=0, help="Sleep before reading input"
     )
+    parser.add_argument(
+        "--hang-first",
+        type=Path,
+        default=None,
+        help="The first engine to create this file hangs at its first go, reading nothing more",
+    )
     return parser.parse_args()
+
+
+def _claim(path: Path) -> bool:
+    """Create ``path`` holding this process's pid, unless another process already did."""
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as claimed:
+        claimed.write(f"{os.getpid()}\n")
+    return True
+
+
+def _wait_until_hung(path: Path, limit_s: float = 20.0) -> None:
+    """Wait until the engine that claimed ``path`` has hung, or ``limit_s`` has passed.
+
+    20 s keeps the wait inside the runner's 30 s handshake limit.
+    """
+    deadline = time.monotonic() + limit_s
+    while time.monotonic() < deadline:
+        if "hung" in path.read_text(encoding="utf-8").split():
+            return
+        time.sleep(0.01)
 
 
 def _board_from_position(command: str) -> chess.Board:
@@ -99,9 +137,14 @@ def _send(line: str) -> None:
 def main() -> None:
     """Run the UCI loop until ``quit`` or end of input."""
     args = _parse_args()
-    if args.exit_at_start is not None:
-        sys.exit(args.exit_at_start)
-    time.sleep(args.startup_delay_ms / 1000)
+    hang_first: Path | None = args.hang_first
+    hangs = hang_first is not None and _claim(hang_first)
+    if hang_first is not None and not hangs:
+        _wait_until_hung(hang_first)
+    if not hangs:
+        time.sleep(args.startup_delay_ms / 1000)
+        if args.exit_at_start is not None:
+            sys.exit(args.exit_at_start)
     go_log: Path | None = args.go_log
     board = chess.Board()
     searches = 0
@@ -118,6 +161,12 @@ def main() -> None:
             if go_log is not None:
                 with go_log.open("a", encoding="utf-8") as log:
                     log.write(f"{command}\n")
+            if hang_first is not None and hangs:
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                with hang_first.open("a", encoding="utf-8") as claimed:
+                    claimed.write("hung\n")
+                time.sleep(3600)
+                return
             sleep_ms: int = args.sleep_ms
             if searches == 0 and args.first_sleep_ms is not None:
                 sleep_ms = args.first_sleep_ms

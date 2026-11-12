@@ -28,7 +28,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import cast
+from typing import IO, cast
 
 import pytest
 from shared.storage.models import GameResult
@@ -502,13 +502,33 @@ def hung_repo_root(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _process_group_is_empty(pgid: int) -> bool:
-    """Return True once no process is left in the process group ``pgid``."""
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return True
-    return False
+def _session_members(sid: int) -> list[int]:
+    """Return the pid of every process in the session ``sid``."""
+    members: list[int] = []
+    for pid in _process_table():
+        with contextlib.suppress(OSError):
+            if os.getsid(pid) == sid:
+                members.append(pid)
+    return members
+
+
+def _session_is_empty(sid: int) -> bool:
+    """Return True once no process is left in the session ``sid``.
+
+    Each test starts the runner in a session of its own. Each worker leads a
+    process group of its own, which its engines join (#209), so the runner's
+    group can empty while they run on, but they stay in its session.
+    """
+    return not _session_members(sid)
+
+
+def _kill_session(sid: int) -> None:
+    """SIGKILL every process left in the session ``sid``, which the runner leads."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(sid, signal.SIGKILL)
+    for pid in _session_members(sid):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGKILL)
 
 
 class TestSignalExit:
@@ -578,12 +598,11 @@ class TestSignalExit:
             assert proc.returncode == exit_code
             assert [m["type"] for m in _parse_json_lines(out)][-1] == "interrupted"
             deadline = time.monotonic() + 5
-            while not _process_group_is_empty(proc.pid):
-                assert time.monotonic() < deadline, "processes were left in the runner's group"
+            while not _session_is_empty(proc.pid):
+                assert time.monotonic() < deadline, "processes were left in the runner's session"
                 time.sleep(0.05)
         finally:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
+            _kill_session(proc.pid)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=10)
 
@@ -673,8 +692,8 @@ class TestWorkerStartMethod:
             assert proc.returncode == 1
             assert [m["type"] for m in _parse_json_lines(out)][-1] == "interrupted"
             deadline = time.monotonic() + 5
-            while not _process_group_is_empty(proc.pid):
-                assert time.monotonic() < deadline, "processes were left in the runner's group"
+            while not _session_is_empty(proc.pid):
+                assert time.monotonic() < deadline, "processes were left in the runner's session"
                 time.sleep(0.05)
             # Workers start the engines, so these lines come from the workers.
             started = re.compile(
@@ -684,8 +703,7 @@ class TestWorkerStartMethod:
             )
             assert len(started.findall(stderr_path.read_text())) >= 2
         finally:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
+            _kill_session(proc.pid)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=10)
 
@@ -768,8 +786,7 @@ class TestRepeatableBuilds:
             assert "game_result" in types
             assert "error" not in types
         finally:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
+            _kill_session(proc.pid)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=10)
 
@@ -806,7 +823,7 @@ def _run_cli(root: Path, limit_s: float, *args: str) -> tuple[int, list[dict[str
     """Run the runner CLI in ``root`` and return its exit code and messages.
 
     Fails the test if the runner is still running after ``limit_s``, or if
-    it leaves a process behind in its process group.
+    it leaves a process behind in its session.
     """
     proc = subprocess.Popen(
         [sys.executable, "-m", "sprt_runner", "run", *args],
@@ -822,13 +839,12 @@ def _run_cli(root: Path, limit_s: float, *args: str) -> tuple[int, list[dict[str
         except subprocess.TimeoutExpired:
             pytest.fail(f"the runner was still running after {limit_s} s")
         deadline = time.monotonic() + 10
-        while not _process_group_is_empty(proc.pid):
-            assert time.monotonic() < deadline, "processes were left in the runner's group"
+        while not _session_is_empty(proc.pid):
+            assert time.monotonic() < deadline, "processes were left in the runner's session"
             time.sleep(0.05)
         return proc.returncode, _parse_json_lines(out)
     finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGKILL)
+        _kill_session(proc.pid)
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=10)
 
@@ -970,3 +986,264 @@ class TestGameLimitsThroughTheCLI:
             0.0,
             0.0,
         )
+
+
+@pytest.fixture
+def hang_first_repo_root(tmp_path: Path) -> Path:
+    """Create a temporary repo root whose test engines hang in their first game (#209).
+
+    ``base-engine`` plays every game. Of the ``hangs`` engines, the first to
+    start hangs at its first ``go``, reading nothing more, and the rest play
+    like the base. Of the ``hangs-then-fails`` engines, the first hangs the
+    same way, and the rest exit with code 2. Either way, the rest first wait
+    until the first has hung. Each records its hung engine in ``<id>.hung``.
+    """
+    engine_dir = tmp_path / "engines" / "scripted"
+    engine_dir.mkdir(parents=True)
+
+    def _entry(engine_id: str, *engine_args: str) -> dict[str, object]:
+        return {
+            "id": engine_id,
+            "name": engine_id,
+            "dir": "engines/scripted",
+            "build": None,
+            "run": " ".join([sys.executable, str(_SCRIPTED_ENGINE), *engine_args]),
+        }
+
+    entries = [
+        _entry("base-engine"),
+        _entry("hangs", "--hang-first", str(tmp_path / "hangs.hung")),
+        _entry(
+            "hangs-then-fails",
+            *("--hang-first", str(tmp_path / "hangs-then-fails.hung"), "--exit-at-start", "2"),
+        ),
+    ]
+    (tmp_path / "engines.json").write_text(json.dumps(entries))
+    return tmp_path
+
+
+def _hung_engine(record: Path) -> int | None:
+    """Return the pid of the engine that ``record`` says has hung, or None before it has."""
+    if not record.exists():
+        return None
+    lines = record.read_text().split()
+    return int(lines[0]) if lines[1:] == ["hung"] else None
+
+
+def _process_exists(pid: int) -> bool:
+    """Return True while ``pid`` is running or hasn't been reaped."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+class TestEnginesThatStopReading:
+    """No engine outlives its run, not even one that never reads its input again (#209).
+
+    The first test engine hangs at its first ``go`` while the other worker
+    plays on, until the run ends. A worker the coordinator terminates can't
+    quit its engines, and the hung engine never notices the end of its input
+    and ignores SIGTERM, so only a SIGKILL ends it.
+    """
+
+    @staticmethod
+    def _start(
+        root: Path,
+        test: str,
+        *args: str,
+        start_method: str | None = None,
+        stderr_path: Path | None = None,
+    ) -> subprocess.Popen[str]:
+        """Start the runner at two workers, ``base-engine`` against ``test``.
+
+        It runs as ``python -m sprt_runner`` would, with SIGHUP at its default
+        even if pytest ignores it, as under nohup. With a ``start_method``, the
+        runner starts its workers that way, as a caller that chooses one would.
+        Otherwise it picks its own, the forkserver. Its stderr goes to
+        ``stderr_path`` if given.
+        """
+        boot = "import signal; signal.signal(signal.SIGHUP, signal.SIG_DFL); "
+        if start_method is not None:
+            boot += f"import multiprocessing; multiprocessing.set_start_method({start_method!r}); "
+        boot += "import runpy; runpy.run_module('sprt_runner', run_name='__main__', alter_sys=True)"
+        with contextlib.ExitStack() as stack:
+            stderr: int | IO[str] = subprocess.DEVNULL
+            if stderr_path is not None:
+                # Append mode, so the runner's and workers' writes never overwrite each other.
+                stderr = stack.enter_context(stderr_path.open("a"))
+            return subprocess.Popen(
+                [
+                    *(sys.executable, "-c", boot, "run"),
+                    *("--base", "base-engine", "--test", test, "--tc", "depth=1"),
+                    *("--move-timeout-ms", "60000", "--concurrency", "2", *args),
+                ],
+                cwd=root,
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                text=True,
+                start_new_session=True,
+            )
+
+    @staticmethod
+    def _finish(proc: subprocess.Popen[str], limit_s: float) -> list[dict[str, object]]:
+        """Wait for the runner to exit by itself and return its messages.
+
+        Workers inherit the runner's output, so one left running keeps it open
+        after the runner has gone.
+        """
+        try:
+            out, _ = proc.communicate(timeout=limit_s)
+        except subprocess.TimeoutExpired:
+            if proc.poll() is not None:
+                pytest.fail(
+                    f"the runner exited ({proc.returncode}), but something it started "
+                    f"still held its output {limit_s} s later"
+                )
+            pytest.fail(f"the runner was still running after {limit_s} s")
+        return _parse_json_lines(out)
+
+    @staticmethod
+    def _wait_until_hung(proc: subprocess.Popen[str], record: Path) -> int:
+        """Wait for an engine to hang and return its pid, failing after 30 s."""
+        deadline = time.monotonic() + 30
+        while (hung := _hung_engine(record)) is None:
+            assert proc.poll() is None, "the runner exited before an engine hung"
+            assert time.monotonic() < deadline, "no engine hung within 30 s"
+            time.sleep(0.05)
+        return hung
+
+    @staticmethod
+    def _assert_nothing_left(hung: int, sid: int) -> None:
+        """The hung engine and everything else in the runner's session go within 10 s."""
+        deadline = time.monotonic() + 10
+        while _process_exists(hung):
+            assert time.monotonic() < deadline, "the hung engine is still running"
+            time.sleep(0.05)
+        while not _session_is_empty(sid):
+            assert time.monotonic() < deadline, "processes were left in the runner's session"
+            time.sleep(0.05)
+
+    @pytest.mark.parametrize(
+        "start_method", [None, "fork", "spawn"], ids=["default", "fork", "spawn"]
+    )
+    def test_sigterm(self, hang_first_repo_root: Path, start_method: str | None) -> None:
+        """The runner gets SIGTERM once the engine has hung.
+
+        It runs with the runner's own start method, the forkserver, and with
+        each start method a caller can choose instead.
+        """
+        if start_method is not None and start_method not in multiprocessing.get_all_start_methods():
+            pytest.skip(f"{start_method} isn't available on this platform")
+        proc = self._start(hang_first_repo_root, "hangs", start_method=start_method)
+        try:
+            hung = self._wait_until_hung(proc, hang_first_repo_root / "hangs.hung")
+
+            proc.send_signal(signal.SIGTERM)
+            messages = self._finish(proc, 10)
+
+            assert proc.returncode == 1
+            assert messages[-1]["type"] == "interrupted"
+            self._assert_nothing_left(hung, proc.pid)
+        finally:
+            _kill_session(proc.pid)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+
+    def test_a_decision(self, hang_first_repo_root: Path) -> None:
+        """The other worker's games are identical draws, and the fifth accepts H0."""
+        proc = self._start(hang_first_repo_root, "hangs", "--elo0", "0", "--elo1", "200")
+        try:
+            messages = self._finish(proc, 60)
+            hung = _hung_engine(hang_first_repo_root / "hangs.hung")
+
+            assert hung is not None, "no engine hung before the run ended"
+            assert proc.returncode == 0
+            assert (messages[-1]["type"], messages[-1].get("result")) == ("complete", "H0")
+            self._assert_nothing_left(hung, proc.pid)
+        finally:
+            _kill_session(proc.pid)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+
+    def test_a_fatal_stop(self, hang_first_repo_root: Path) -> None:
+        """The other worker's games fail, and two failures in a row stop the run."""
+        proc = self._start(hang_first_repo_root, "hangs-then-fails")
+        try:
+            messages = self._finish(proc, 60)
+            hung = _hung_engine(hang_first_repo_root / "hangs-then-fails.hung")
+
+            assert hung is not None, "no engine hung before the run ended"
+            assert proc.returncode == 1
+            last = messages[-1]
+            assert last["type"] == "error"
+            assert str(last["message"]).startswith("Aborting after 2 failed games in a row")
+            self._assert_nothing_left(hung, proc.pid)
+        finally:
+            _kill_session(proc.pid)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+
+    def test_a_hangup(self, hang_first_repo_root: Path) -> None:
+        """SIGHUP reaches the runner's process group once the engine has hung.
+
+        That's what a terminal sends to its foreground group when it hangs
+        up. The workers aren't in that group, so the runner has to end them.
+        The forkserver and its resource tracker are in it, and must survive
+        the hangup: with the forkserver gone, every worker would look dead.
+        """
+        stderr_path = hang_first_repo_root / "stderr.log"
+        proc = self._start(hang_first_repo_root, "hangs", stderr_path=stderr_path)
+        try:
+            hung = self._wait_until_hung(proc, hang_first_repo_root / "hangs.hung")
+
+            os.killpg(proc.pid, signal.SIGHUP)
+            messages = self._finish(proc, 10)
+
+            assert proc.returncode == 1
+            assert messages[-1]["type"] == "interrupted"
+            assert [m for m in messages if m["type"] == "error"] == []
+            self._assert_nothing_left(hung, proc.pid)
+            assert "process died unexpectedly" not in stderr_path.read_text()
+        finally:
+            _kill_session(proc.pid)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+
+    def test_a_dead_worker(self, hang_first_repo_root: Path) -> None:
+        """The hung engine's worker is SIGKILLed, and the run goes on.
+
+        The coordinator finds the death and kills the dead worker's group, so
+        the engine goes while the run is still playing. One death isn't a full
+        round at two workers, so SIGTERM ends the run.
+        """
+        proc = self._start(hang_first_repo_root, "hangs")
+        try:
+            hung = self._wait_until_hung(proc, hang_first_repo_root / "hangs.hung")
+            worker = _process_table()[hung][0]
+            assert worker != proc.pid
+
+            os.kill(worker, signal.SIGKILL)
+            deadline = time.monotonic() + 10
+            while _process_exists(hung):
+                assert proc.poll() is None, "the runner exited after one worker died"
+                assert time.monotonic() < deadline, "the hung engine is still running"
+                time.sleep(0.05)
+            assert proc.poll() is None, "the runner exited after one worker died"
+
+            proc.send_signal(signal.SIGTERM)
+            messages = self._finish(proc, 10)
+
+            assert proc.returncode == 1
+            assert messages[-1]["type"] == "interrupted"
+            errors = [str(m["message"]) for m in messages if m["type"] == "error"]
+            assert len(errors) == 1
+            assert re.fullmatch(
+                rf"Worker for game \S+ died unexpectedly \(pid={worker}\)", errors[0]
+            )
+            self._assert_nothing_left(hung, proc.pid)
+        finally:
+            _kill_session(proc.pid)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)

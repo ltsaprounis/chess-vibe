@@ -25,9 +25,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import contextlib
 import json
 import logging
 import multiprocessing
+import multiprocessing.forkserver
+import os
 import queue
 import shlex
 import signal
@@ -562,9 +565,9 @@ async def _play_single_game(task: WorkerTask) -> WorkerResult:
     except Exception as e:
         return _failed_game(task, _describe(e))
     finally:
-        # quit() raises when it writes into a pipe the engine has already
-        # closed, as an engine that failed to start or crashed can leave it.
-        # The game's result must still be returned, and the other engine quit.
+        # quit() kills an engine it can't tell to quit, rather than raise
+        # (#209). Should anything else make it raise, the game's result must
+        # still be returned, and the other engine quit.
         for engine, label in ((white_engine, task.white_label), (black_engine, task.black_label)):
             try:
                 await engine.quit()
@@ -612,6 +615,22 @@ def worker_entry(
     # first to keep it short.
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     signal.signal(signal.SIGINT, signal.default_int_handler)
+    # Lead a process group of its own, which the engines this worker starts
+    # join. The coordinator kills the group when it terminates the worker or
+    # finds it dead, so an engine that has stopped reading its input can't
+    # outlive the worker (#209). An engine's own child processes, as behind a
+    # wrapper such as ``uv run``, can still outlive a game that ends
+    # normally, since quit() kills only the process it started. Out of the
+    # terminal's foreground group, the worker no longer gets Ctrl-C or a
+    # hangup from the terminal; the coordinator ends it instead. It ignores
+    # SIGTTOU, with which a terminal set to ``stty tostop`` would stop it the
+    # first time it logs.
+    os.setpgid(0, 0)
+    signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    # main() starts the forkserver ignoring SIGHUP; its workers needn't. Only
+    # now that this worker has left the runner's group, which a terminal's
+    # hangup reaches, can it stop ignoring it.
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
     # Workers started by forkserver or spawn don't inherit the runner's
     # logging setup, so their warnings would lose their format and their INFO
     # lines would be dropped.
@@ -668,11 +687,35 @@ def _drain_results(
             return drained
 
 
+def _kill_worker_group(worker: multiprocessing.Process) -> None:
+    """SIGKILL what's left of a worker's process group: the engines it started.
+
+    Each worker leads a process group, which its engines join (see
+    :func:`worker_entry`). Call this once the worker has exited or been sent
+    SIGKILL, when it can no longer start an engine. The group outlives the
+    worker while an engine is left in it, and its ID isn't reused as a process
+    ID until the group is gone.
+
+    Args:
+        worker: A worker that has exited or been sent SIGKILL. One that never
+            started has no group.
+    """
+    if worker.pid is None:
+        return
+    # An empty group raises ProcessLookupError. On macOS, a group whose only
+    # process is an unreaped zombie, as the worker can be for a moment, raises
+    # PermissionError.
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(worker.pid, signal.SIGKILL)
+
+
 def _terminate_all_workers(active_workers: list[multiprocessing.Process]) -> None:
-    """Terminate all active workers using SIGTERM → join → SIGKILL.
+    """Terminate all active workers using SIGTERM → join → SIGKILL, then their engines.
 
     Sends ``SIGTERM`` to each worker, waits briefly, and escalates to
-    ``SIGKILL`` if the worker does not exit in time.
+    ``SIGKILL`` if the worker does not exit in time. Once it has exited, or
+    been sent SIGKILL, its process group is killed, taking any engine still
+    running with it.
 
     Args:
         active_workers: Workers to terminate.
@@ -687,6 +730,7 @@ def _terminate_all_workers(active_workers: list[multiprocessing.Process]) -> Non
             )
             w.kill()
             w.join(timeout=2)
+        _kill_worker_group(w)
 
 
 def _collect_worktree_paths(
@@ -725,8 +769,9 @@ async def run_sprt(config: RunConfig) -> None:
     Worktrees created during engine resolution are cleaned up after the
     test completes (or fails), unless ``config.keep_worktrees`` is True.
 
-    On ``SIGTERM`` the current asyncio task is cancelled, which triggers
-    graceful worker termination inside ``_run_sprt_inner``.
+    On ``SIGTERM``, or ``SIGHUP`` unless the run started out ignoring it, the
+    current asyncio task is cancelled, which triggers graceful worker
+    termination inside ``_run_sprt_inner``.
 
     Args:
         config: Run configuration.
@@ -748,22 +793,30 @@ async def run_sprt(config: RunConfig) -> None:
     if not config.early_stop and config.max_games is None:
         raise ValueError("early_stop=False requires max_games")
 
-    # Register SIGTERM → cancel-task handler so SIGTERM triggers the same
-    # graceful shutdown path as SIGINT (KeyboardInterrupt → CancelledError).
+    # SIGTERM cancels the task, which triggers the same graceful shutdown path
+    # as SIGINT (KeyboardInterrupt → CancelledError). So does SIGHUP. A
+    # terminal that hangs up sends it to the runner's process group, which no
+    # longer holds the workers (#209), so without a handler the runner would
+    # die without its cleanup and leave every worker to play out its game. A
+    # run started out ignoring SIGHUP, as under nohup, goes on ignoring it.
     loop = asyncio.get_running_loop()
     current_task = asyncio.current_task()
 
-    def _sigterm_handler() -> None:
-        logger.info("Received SIGTERM — cancelling SPRT task")
+    def _cancel_on_signal(sig: signal.Signals) -> None:
+        logger.info("Received %s — cancelling SPRT task", sig.name)
         if current_task is not None:
             current_task.cancel()
 
-    sigterm_registered = False
+    handled = [signal.SIGTERM]
+    if signal.getsignal(signal.SIGHUP) is not signal.SIG_IGN:
+        handled.append(signal.SIGHUP)
+    registered: list[signal.Signals] = []
     try:
-        loop.add_signal_handler(signal.SIGTERM, _sigterm_handler)
-        sigterm_registered = True
+        for sig in handled:
+            loop.add_signal_handler(sig, _cancel_on_signal, sig)
+            registered.append(sig)
     except NotImplementedError:
-        pass  # Windows — SIGTERM via add_signal_handler not supported
+        pass  # Windows — add_signal_handler isn't supported
 
     # Resolve engines
     base_spec = parse_engine_spec(config.base)
@@ -775,8 +828,8 @@ async def run_sprt(config: RunConfig) -> None:
     try:
         await _run_sprt_inner(config, base_spec, test_spec)
     finally:
-        if sigterm_registered:
-            loop.remove_signal_handler(signal.SIGTERM)
+        for sig in registered:
+            loop.remove_signal_handler(sig)
         if not config.keep_worktrees:
             for wt_path in worktree_paths:
                 await cleanup_worktree(wt_path, repo_root=config.repo_root)
@@ -962,6 +1015,7 @@ async def _run_sprt_inner(config: RunConfig, base_spec: EngineSpec, test_spec: E
                     errors += 1
                     consecutive_deaths += 1
                     dead_worker.join()
+                    _kill_worker_group(dead_worker)
                 if dead and consecutive_deaths >= config.concurrency:
                     deaths = "death" if consecutive_deaths == 1 else "deaths"
                     _abort(
@@ -1238,6 +1292,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _start_forkserver_ignoring_sighup() -> None:
+    """Start the forkserver, and the resource tracker it starts, ignoring SIGHUP.
+
+    Both stay in the runner's process group, which a terminal that hangs up
+    sends SIGHUP to, and neither handles it. With the forkserver gone, every
+    worker would look dead to the coordinator, so a hangup the runner handles
+    (#209) could be reported as worker deaths, or end the run as a fatal
+    error, rather than as an interrupted run. A signal ignored at exec stays
+    ignored, so the two keep ignoring it. The runner's own disposition is put
+    back afterwards.
+    """
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        multiprocessing.forkserver.ensure_running()
+    finally:
+        signal.signal(signal.SIGHUP, previous if previous is not None else signal.SIG_DFL)
+
+
 def main() -> None:
     """CLI entry point for ``python -m sprt_runner``."""
     # Configure logging to stderr only
@@ -1337,6 +1409,7 @@ def main() -> None:
     if chosen is None and "forkserver" in multiprocessing.get_all_start_methods():
         multiprocessing.set_start_method("forkserver")
         multiprocessing.set_forkserver_preload([worker_entry.__module__])
+        _start_forkserver_ignoring_sighup()
 
     try:
         asyncio.run(run_sprt(run_config))
