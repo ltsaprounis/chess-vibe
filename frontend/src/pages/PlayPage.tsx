@@ -5,6 +5,8 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import { useChessGame } from '../hooks/useChessGame'
 import { Board } from '../components/Board/Board'
 import { EvalBar } from '../components/EvalBar/EvalBar'
+import { formatAnnotation, toWhitePerspective } from '../components/EvalBar/whitePerspective'
+import type { WhitePerspectiveScore } from '../components/EvalBar/whitePerspective'
 import { MoveList } from '../components/MoveList/MoveList'
 import type { MoveItem } from '../components/MoveList/MoveList'
 import { PromotionDialog } from '../components/Board/PromotionDialog'
@@ -20,8 +22,10 @@ interface WsIncomingMessage {
   game_id?: string
   fen?: string
   move?: string
-  score_cp?: number
-  score_mate?: number
+  // The engine's raw UCI score, from its own side: null for the kind of
+  // score it didn't report.
+  score_cp?: number | null
+  score_mate?: number | null
   depth?: number
   pv?: string[]
   result?: string
@@ -65,7 +69,7 @@ export function PlayPage(): React.JSX.Element {
   const [gameId, setGameId] = useState<string | null>(null)
   const [gameResult, setGameResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [latestEval, setLatestEval] = useState<{ scoreCp?: number; scoreMate?: number }>({})
+  const [latestEval, setLatestEval] = useState<WhitePerspectiveScore>({})
 
   // Chess game state
   const { fen, moves, turn, makeMove, addEngineMove, reset, getLegalMoves, isPromotionMove } =
@@ -99,20 +103,17 @@ export function PlayPage(): React.JSX.Element {
         case 'started':
           setGameId(data.game_id ?? null)
           break
-        case 'engine_move':
+        case 'engine_move': {
+          // The score is the engine's, from its own side, and the engine plays
+          // the colour opposite the player's. The eval bar and the move list
+          // read scores from White's side.
+          const score = toWhitePerspective(data, playerColor === 'white')
           if (data.move) {
-            addEngineMove(data.move, {
-              scoreCp: data.score_cp,
-              scoreMate: data.score_mate,
-              depth: data.depth,
-              pv: data.pv,
-            })
+            addEngineMove(data.move, { ...score, depth: data.depth, pv: data.pv })
           }
-          setLatestEval({
-            scoreCp: data.score_cp,
-            scoreMate: data.score_mate,
-          })
+          setLatestEval(score)
           break
+        }
         case 'game_over':
           setGameResult(data.result ?? null)
           break
@@ -121,7 +122,7 @@ export function PlayPage(): React.JSX.Element {
           break
       }
     },
-    [addEngineMove],
+    [addEngineMove, playerColor],
   )
 
   // WebSocket connection
@@ -288,15 +289,11 @@ export function PlayPage(): React.JSX.Element {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  // Convert moves to MoveList format
+  // Convert moves to MoveList format. An engine move's score is already
+  // White's (see handleWsMessage); the player's moves have none.
   const moveItems: MoveItem[] = moves.map((m) => ({
     san: m.san,
-    annotation:
-      m.scoreCp !== undefined
-        ? `(${m.scoreCp >= 0 ? '+' : ''}${(m.scoreCp / 100).toFixed(1)})`
-        : m.scoreMate !== undefined
-          ? `(M${m.scoreMate})`
-          : undefined,
+    annotation: formatAnnotation(m),
   }))
 
   const isPlaying = gameId !== null

@@ -34,6 +34,27 @@ vi.mock('react-chessboard', () => ({
 
 const STANDARD_INITIAL_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 
+const MINUS = '\u2212'
+
+/** The annotation the move list shows after `san`, or '' if it has none. */
+function annotationAfter(san: string): string {
+  return screen.getByText(san).nextElementSibling?.textContent ?? ''
+}
+
+/** The y at which eval-graph point `index` is plotted; smaller is higher. */
+function graphPointY(index: number): number {
+  return Number(screen.getByTestId(`eval-graph-point-${index}`).getAttribute('cy'))
+}
+
+/**
+ * The y at which a score of 0 plots. The graph's domain is symmetric about 0,
+ * so that's the middle of its viewBox, and a point above it favours White.
+ */
+function graphZeroY(): number {
+  const graph = screen.getByRole('img', { name: /Evaluation graph/ })
+  return Number(graph.getAttribute('viewBox')?.split(' ')[3]) / 2
+}
+
 function renderAtPath(path: string): ReturnType<typeof render> {
   return render(
     <MemoryRouter initialEntries={[path]}>
@@ -309,6 +330,23 @@ describe('GameReplayPage', () => {
   })
 
   // -----------------------------------------------------------------------
+  // Move list scores
+  // -----------------------------------------------------------------------
+
+  it("annotates each move with its score from White's side", async () => {
+    renderAtPath('/games/game-1')
+    await waitFor(() => expect(screen.getByTestId('chessboard')).toBeInTheDocument())
+
+    expect(annotationAfter('e4')).toBe('(+0.2)')
+    // Black's +0.1 for itself is White's minus 0.1, written with U+2212 as
+    // the eval bar and the Play page write it.
+    expect(annotationAfter('e5')).toBe(`(${MINUS}0.1)`)
+    expect(annotationAfter('Nf3')).toBe('(+0.3)')
+    expect(annotationAfter('Nc6')).toBe('')
+    expect(annotationAfter('Bb5')).toBe('(M3)')
+  })
+
+  // -----------------------------------------------------------------------
   // Keyboard navigation
   // -----------------------------------------------------------------------
 
@@ -469,6 +507,33 @@ describe('GameReplayPage', () => {
     expect(screen.getByTestId('eval-graph-line')).toBeInTheDocument()
   })
 
+  it("plots each move's score from White's side on the eval graph", async () => {
+    renderAtPath('/games/game-1')
+    await waitFor(() => expect(screen.getByTestId('chessboard')).toBeInTheDocument())
+
+    expect(graphPointY(0)).toBeLessThan(graphZeroY()) // e4: White's +0.2
+    expect(graphPointY(1)).toBeGreaterThan(graphZeroY()) // e5: Black's +0.1 for itself
+    expect(graphPointY(4)).toBeLessThan(graphZeroY()) // Bb5: White mates in 3
+  })
+
+  it("shows a mate by Black from White's side", async () => {
+    vi.mocked(fetchGame).mockResolvedValue({
+      ...sampleGame,
+      // Black, moving second, announces that it mates in 2.
+      moves: [sampleGame.moves[0], { ...sampleGame.moves[1], score_cp: null, score_mate: 2 }],
+    })
+    const user = userEvent.setup()
+    renderAtPath('/games/game-1')
+    await waitFor(() => expect(screen.getByTestId('chessboard')).toBeInTheDocument())
+
+    expect(annotationAfter('e5')).toBe('(M-2)')
+    expect(graphPointY(1)).toBeGreaterThan(graphZeroY())
+
+    await user.click(screen.getByRole('button', { name: /e5/ }))
+    expect(screen.getByRole('meter')).toHaveTextContent('M-2')
+    expect(screen.getByRole('meter')).toHaveAttribute('aria-valuenow', '0')
+  })
+
   // -----------------------------------------------------------------------
   // Zero-move game
   // -----------------------------------------------------------------------
@@ -580,6 +645,9 @@ describe('GameReplayPage', () => {
     await user.click(screen.getByRole('button', { name: 'Next' }))
     expect(screen.getByText('−3.0')).toBeInTheDocument()
     expect(screen.queryByText('+3.0')).not.toBeInTheDocument()
+    // The move list and the graph take the mover from start_fen too.
+    expect(annotationAfter('e4')).toBe(`(${MINUS}3.0)`)
+    expect(graphPointY(0)).toBeGreaterThan(graphZeroY())
   })
 
   // -----------------------------------------------------------------------

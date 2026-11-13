@@ -4,6 +4,8 @@ import { fetchGame, ApiError } from '../services/api'
 import type { GameDetail, Move } from '../services/api'
 import { Board } from '../components/Board/Board'
 import { EvalBar } from '../components/EvalBar/EvalBar'
+import { formatAnnotation, toWhitePerspective } from '../components/EvalBar/whitePerspective'
+import type { WhitePerspectiveScore } from '../components/EvalBar/whitePerspective'
 import { MoveList } from '../components/MoveList/MoveList'
 import type { MoveItem } from '../components/MoveList/MoveList'
 import { isBlackMoveAt, moveLabel, parseStartPosition } from '../components/MoveList/startPosition'
@@ -28,50 +30,23 @@ const BOARD_SIZE_PX = 400
 const NAV_BUTTON_CLASS =
   'rounded bg-gray-700 px-3 py-1 text-white hover:bg-gray-600 disabled:cursor-not-allowed disabled:opacity-40'
 
-interface WhitePerspectiveScore {
-  scoreCp?: number
-  scoreMate?: number
-}
-
 /**
- * Eval sign convention: `Move.score_cp` / `Move.score_mate` are stored from
- * the perspective of whichever side made that move (the raw UCI `info
- * score` convention). Moves strictly alternate colour starting from whoever
- * is to move in `start_fen`, so index 0 cannot be assumed to be White's —
- * `start_fen` holds arbitrary opening-book positions, including odd-ply
- * lines with Black to move. The mover therefore comes from
- * {@link isBlackMoveAt} against the parsed `start_fen`, which is the same
- * derivation MoveList uses to number the moves.
- *
- * EvalBar and EvalGraph both read scores as "White's advantage" (the
- * conventional way to read an eval bar/graph), so a move played by Black
- * has its sign flipped here before it reaches either component.
+ * A stored move's score from White's side, for the eval bar, the move list
+ * and the graph alike. `Move.score_cp` / `Move.score_mate` are from the side
+ * that made the move (see {@link toWhitePerspective}). Moves strictly
+ * alternate colour starting from whoever is to move in `start_fen`, so
+ * index 0 cannot be assumed to be White's — `start_fen` holds arbitrary
+ * opening-book positions, including odd-ply lines with Black to move. The
+ * mover therefore comes from {@link isBlackMoveAt} against the parsed
+ * `start_fen`, which is the same derivation MoveList uses to number the
+ * moves.
  */
-function toWhitePerspective(
+function moveToWhitePerspective(
   move: Move,
   index: number,
   startPosition: StartPosition,
 ): WhitePerspectiveScore {
-  const isBlackMove = isBlackMoveAt(index, startPosition)
-  const scoreCp = move.score_cp === null ? undefined : isBlackMove ? -move.score_cp : move.score_cp
-  const scoreMate =
-    move.score_mate === null ? undefined : isBlackMove ? -move.score_mate : move.score_mate
-  return { scoreCp, scoreMate }
-}
-
-/**
- * Matches EvalBar's own formatScore exactly (mate takes priority over cp,
- * same U+2212 minus glyph for negatives) so the same score never reads
- * differently in the move list than it does on the eval bar.
- */
-function formatAnnotation(score: WhitePerspectiveScore): string | undefined {
-  if (score.scoreMate !== undefined) return `(M${score.scoreMate})`
-  if (score.scoreCp !== undefined) {
-    const pawns = score.scoreCp / 100
-    if (score.scoreCp >= 0) return `(+${pawns.toFixed(1)})`
-    return `(−${Math.abs(pawns).toFixed(1)})`
-  }
-  return undefined
+  return toWhitePerspective(move, isBlackMoveAt(index, startPosition))
 }
 
 /**
@@ -214,14 +189,14 @@ function GameReplayView({ id }: GameReplayViewProps): React.JSX.Element {
   // Who moves first, and which full move the game resumes at, are read from
   // `start_fen` rather than assumed — an opening-book position can have
   // Black to move and can start well past move 1. This single parse feeds
-  // both the eval signs (`toWhitePerspective`) and the move numbering
+  // both the eval signs (`moveToWhitePerspective`) and the move numbering
   // (MoveList, and the status line below).
   const startPosition = parseStartPosition(game?.start_fen)
 
   const currentScore: WhitePerspectiveScore =
     currentMoveIndex === START_POSITION_INDEX || !moves[currentMoveIndex]
       ? {}
-      : toWhitePerspective(moves[currentMoveIndex], currentMoveIndex, startPosition)
+      : moveToWhitePerspective(moves[currentMoveIndex], currentMoveIndex, startPosition)
 
   const currentMoveHasEval =
     currentMoveIndex !== START_POSITION_INDEX &&
@@ -232,11 +207,11 @@ function GameReplayView({ id }: GameReplayViewProps): React.JSX.Element {
 
   const moveItems: MoveItem[] = moves.map((m, i) => ({
     san: m.san,
-    annotation: formatAnnotation(toWhitePerspective(m, i, startPosition)),
+    annotation: formatAnnotation(moveToWhitePerspective(m, i, startPosition)),
   }))
 
   const graphPoints: EvalGraphPoint[] = moves.map((m, i) => {
-    const score = toWhitePerspective(m, i, startPosition)
+    const score = moveToWhitePerspective(m, i, startPosition)
     return {
       scoreCp: score.scoreCp ?? null,
       scoreMate: score.scoreMate ?? null,
