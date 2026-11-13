@@ -784,4 +784,145 @@ describe('PlayPage', () => {
     // No promotion dialog should appear for engine moves
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
+
+  // -----------------------------------------------------------------------
+  // Engine evaluation
+  // -----------------------------------------------------------------------
+
+  // An engine_move carries the engine's raw UCI score, from the engine's own
+  // side; the eval bar and the move list read scores from White's side. The
+  // backend sends null for the kind of score the engine didn't report, so a
+  // mate arrives with score_cp: null. Only the scores' signs matter here.
+
+  const MINUS = '\u2212'
+
+  /** The annotation the move list shows after `san`, or '' if it has none. */
+  function annotationAfter(san: string): string {
+    return screen.getByText(san).nextElementSibling?.textContent ?? ''
+  }
+
+  function receiveEngineMove(move: string, scoreCp: number | null, scoreMate: number | null): void {
+    act(() => {
+      capturedOnMessage?.({
+        type: 'engine_move',
+        move,
+        score_cp: scoreCp,
+        score_mate: scoreMate,
+        depth: 7,
+        pv: [move],
+      })
+    })
+  }
+
+  function playE4(): void {
+    act(() => {
+      capturedBoardOnPieceDrop?.({ piece: 'wP', sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+  }
+
+  it("shows a centipawn score from White's side when the engine plays Black", async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user) // the player is White, so the engine plays Black
+
+    playE4()
+    // The engine rates its own side, Black, 1.1 pawns better.
+    receiveEngineMove('b8c6', 110, null)
+
+    const evalBar = screen.getByRole('meter')
+    expect(evalBar).toHaveTextContent(`${MINUS}1.1`)
+    expect(evalBar).toHaveAttribute('aria-valuenow', '39')
+    expect(annotationAfter('Nc6')).toBe(`(${MINUS}1.1)`)
+  })
+
+  it("shows a mate score from White's side when the engine plays Black", async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    playE4()
+    // The engine, as Black, announces that it mates in 3.
+    receiveEngineMove('b8c6', null, 3)
+
+    const evalBar = screen.getByRole('meter')
+    expect(evalBar).toHaveTextContent('M-3')
+    expect(evalBar).toHaveAttribute('aria-valuenow', '0')
+    expect(annotationAfter('Nc6')).toBe('(M-3)')
+  })
+
+  it("keeps the engine's score as it is when the engine plays White", async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await waitFor(() => expect(screen.getByLabelText('Engine')).toBeInTheDocument())
+    await user.click(screen.getByText('Black'))
+    await startGame(user)
+
+    // The engine moves first, as White, and rates its own side 0.5 pawns worse.
+    receiveEngineMove('e2e4', -50, null)
+
+    const evalBar = screen.getByRole('meter')
+    expect(evalBar).toHaveTextContent(`${MINUS}0.5`)
+    expect(evalBar).toHaveAttribute('aria-valuenow', '45')
+    expect(annotationAfter('e4')).toBe(`(${MINUS}0.5)`)
+  })
+
+  it('shows no score after an engine move that came without one', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    playE4()
+    receiveEngineMove('b8c6', null, null)
+
+    expect(annotationAfter('Nc6')).toBe('')
+  })
+
+  it('shows a level score as +0.0 when the engine plays Black', async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    playE4()
+    // random-engine always reports cp 0. Negated for Black it is -0, still level.
+    receiveEngineMove('b8c6', 0, null)
+
+    expect(screen.getByRole('meter')).toHaveAttribute('aria-valuenow', '50')
+    expect(annotationAfter('Nc6')).toBe('(+0.0)')
+  })
+
+  it("keeps the eval bar on the engine's latest score, not an earlier mate", async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user)
+
+    playE4()
+    receiveEngineMove('b8c6', null, 3)
+    act(() => {
+      capturedBoardOnPieceDrop?.({ piece: 'wP', sourceSquare: 'd2', targetSquare: 'd4' })
+    })
+    // A later centipawn score replaces the mate.
+    receiveEngineMove('g8f6', 50, null)
+
+    expect(screen.getByRole('meter')).toHaveTextContent(`${MINUS}0.5`)
+    expect(annotationAfter('Nf6')).toBe(`(${MINUS}0.5)`)
+  })
+
+  it("follows the engine's colour from one game to the next", async () => {
+    const user = userEvent.setup()
+    render(<PlayPage />)
+    await startGame(user) // the engine plays Black
+    playE4()
+    receiveEngineMove('b8c6', 110, null)
+    expect(screen.getByRole('meter')).toHaveTextContent(`${MINUS}1.1`)
+
+    await user.click(screen.getByRole('button', { name: 'New Game' }))
+    await user.click(screen.getByText('Black'))
+    await startGame(user) // now the engine plays White
+    // The new game's bar starts level, not on the last game's score.
+    expect(screen.getByRole('meter')).toHaveAttribute('aria-valuenow', '50')
+    receiveEngineMove('e2e4', 110, null)
+
+    expect(screen.getByRole('meter')).toHaveTextContent('+1.1')
+    expect(annotationAfter('e4')).toBe('(+1.1)')
+  })
 })

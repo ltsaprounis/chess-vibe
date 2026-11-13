@@ -23,8 +23,8 @@
  * comparable across games and an outlier score can't blow out the scale.
  * `x` is plotted on the raw half-move (ply) index into `points`, not a
  * full-move number — deriving full-move/side labels needs to know which
- * side moved first (see GameReplayPage's `toWhitePerspective`), which this
- * component intentionally has no knowledge of.
+ * side moved first (see `isBlackMoveAt` in MoveList/startPosition.ts),
+ * which this component intentionally has no knowledge of.
  *
  * A forced mate of exactly 0 (`scoreMate === 0`) is treated as bad for the
  * side that moved — i.e. `scoreMate > 0` clamps to the top (White better),
