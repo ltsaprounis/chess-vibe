@@ -15,7 +15,7 @@ Architecture principles, ownership boundaries, and high-level component design f
 | Owner | Scope | Details |
 |---|---|---|
 | **Human** | `engines/my-engine/` | 100% hand-written. Board representation, move generation, search, evaluation, UCI adapter, and all tests. Fully standalone — zero dependencies on the infrastructure. **Never generate, modify, or refactor any file under this path.** |
-| **Copilot** | Everything else | `shared/`, `engines/random-engine/`, `engines/external/`, `sprt-runner/`, `backend/`, `frontend/`, `scripts/`, `books/`, `data/`, and all project-level config. Builds all infrastructure that drives engines as UCI subprocesses. |
+| **Copilot** | Everything else | `shared/`, `engines/random-engine/`, `engines/lab-engine/`, `engines/external/`, `sprt-runner/`, `backend/`, `frontend/`, `scripts/`, `books/`, `data/`, and all project-level config. Builds all infrastructure that drives engines as UCI subprocesses. |
 
 ## High-Level Architecture
 
@@ -52,6 +52,7 @@ Architecture principles, ownership boundaries, and high-level component design f
 ├──────────────────┤
 │  my-engine       │
 │  random-engine   │
+│  lab-engine      │
 │  stockfish       │
 └──────────────────┘
 ```
@@ -86,6 +87,7 @@ chess-vibe/
 │           └── pgn_export.py     # PGN export utility
 ├── engines/
 │   ├── random-engine/            # Minimal UCI engine (random legal moves)
+│   ├── lab-engine/               # Python engine the autoresearch loop improves (#190)
 │   ├── my-engine/                # HUMAN-ONLY — never touch
 │   └── external/                 # Git submodules (e.g., Stockfish)
 ├── sprt-runner/                  # Custom SPRT testing framework (CLI)

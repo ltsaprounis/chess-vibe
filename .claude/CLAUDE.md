@@ -48,13 +48,13 @@ reason — fastapi's own range is loose).
 session. Each knows its component's scope, boundary rules, and
 verification gates:
 
-| Agent           | Owns                                                                           |
-|-----------------|--------------------------------------------------------------------------------|
-| shared-dev      | `shared/` — UCI client, storage, registry                                      |
-| sprt-runner-dev | `sprt-runner/` — SPRT CLI + orchestration                                      |
-| backend-dev     | `backend/` — FastAPI REST/WS + services                                        |
-| frontend-dev    | `frontend/` — React UI                                                         |
-| engines-dev     | `engines/random-engine/`, `engines/external/`, `engines.json` — never my-engine |
+| Agent           | Owns                                                                                                   |
+|-----------------|--------------------------------------------------------------------------------------------------------|
+| shared-dev      | `shared/` — UCI client, storage, registry                                                              |
+| sprt-runner-dev | `sprt-runner/` — SPRT CLI + orchestration                                                              |
+| backend-dev     | `backend/` — FastAPI REST/WS + services                                                                |
+| frontend-dev    | `frontend/` — React UI                                                                                 |
+| engines-dev     | `engines/random-engine/`, `engines/lab-engine/`, `engines/external/`, `engines.json` — never my-engine |
 
 One cross-cutting agent sits apart from the table:
 `boundary-reviewer` (read-only) reviews a diff

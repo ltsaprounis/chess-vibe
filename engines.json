@@ -5,5 +5,12 @@
     "dir": "engines/random-engine",
     "build": "uv venv --clear .venv && uv pip install --python .venv/bin/python -e .",
     "run": ".venv/bin/python -m random_engine"
+  },
+  {
+    "id": "lab-engine",
+    "name": "Lab Engine",
+    "dir": "engines/lab-engine",
+    "build": "uv venv --clear --python 3.13 .venv && uv pip install --python .venv/bin/python -e . && .venv/bin/python -m lab_engine.warm",
+    "run": ".venv/bin/python -m lab_engine"
   }
 ]
