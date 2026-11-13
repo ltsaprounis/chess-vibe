@@ -28,8 +28,12 @@ make test          # Run unit tests for all components
 Integration tests require a built `random-engine` venv. To set up:
 
 ```bash
-make setup         # Builds all components including random-engine
+make setup         # Builds all components, and every engine in engines.json
 ```
+
+`engines/lab-engine`'s integration tests check move generation against the
+published perft counts up to 200 million nodes, and take about a minute on an
+M4 Max (longer on slower machines).
 
 Then run integration tests:
 

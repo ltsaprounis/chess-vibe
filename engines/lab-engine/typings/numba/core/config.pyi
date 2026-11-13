@@ -1,0 +1,2 @@
+CACHE_DIR: str
+NUMBA_NUM_THREADS: int

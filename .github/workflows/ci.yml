@@ -64,6 +64,9 @@ jobs:
       - name: Type-check engines/random-engine
         run: cd engines/random-engine && uv sync --dev && uv run pyright
 
+      - name: Type-check engines/lab-engine
+        run: cd engines/lab-engine && uv sync --dev && uv run pyright
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -84,6 +87,7 @@ jobs:
         component:
           - shared
           - engines/random-engine
+          - engines/lab-engine
           - sprt-runner
           - backend
     steps:
@@ -113,6 +117,7 @@ jobs:
           - shared
           - sprt-runner
           - backend
+          - engines/lab-engine
     steps:
       - uses: actions/checkout@v4
 
