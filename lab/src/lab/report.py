@@ -6,8 +6,8 @@ them, the latest anchor run's Elo against each opponent, and machine hours.
 Machine hours are wall-clock hours from each command's start to its record,
 since the lab runs one command at a time and each keeps the machine busy.
 
-The layout is fixed, so the researcher agent (#194) can read it as reliably
-as a person.
+The layout is fixed, so the researcher agent can read it as reliably as a
+person.
 """
 
 from __future__ import annotations

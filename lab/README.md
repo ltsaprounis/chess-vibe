@@ -1,10 +1,8 @@
 # Lab
 
-The keep-or-reject half of the autoresearch loop in
-[#190](https://github.com/ltsaprounis/chess-vibe/issues/190): `lab attempt`,
-`lab anchor` and `lab report`. The researcher agent
-([#194](https://github.com/ltsaprounis/chess-vibe/issues/194)) proposes changes
-to `engines/lab-engine/`; this CLI tests each one through the SPRT runner and
+The keep-or-reject half of the autoresearch loop: `lab attempt`, `lab anchor`
+and `lab report`. The researcher agent proposes changes to
+`engines/lab-engine/`; this CLI tests each one through the SPRT runner and
 decides its fate, so the agent never judges its own results.
 
 It drives the runner only as a CLI subprocess, with the runner's own
@@ -169,8 +167,8 @@ checks its flags. Every ledger entry records the settings that decide its
 verdict (time controls, bounds, game and time-loss limits, and for an attempt
 the correctness commands) and the config file's SHA-256.
 
-**The time controls, bounds and limits are provisional** until
-[#193](https://github.com/ltsaprounis/chess-vibe/issues/193) calibrates them.
+**The time controls, bounds and limits are provisional,** until they're
+calibrated on this machine at the lab engine's real draw rates.
 
 ## Tests
 

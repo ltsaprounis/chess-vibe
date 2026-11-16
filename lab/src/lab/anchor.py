@@ -2,8 +2,7 @@
 
 Every accepted change passed two SPRTs, but in simulation 2.5 to 5% of
 changes worth nothing pass SPRT, so over hundreds of attempts useless ones
-get in. Fixed-length matches against frozen older versions catch that drift
-(#190).
+get in. Fixed-length matches against frozen older versions catch that drift.
 
 ``lab anchor`` plays lab/main's tip, the version, against random-engine
 (built at the harness commit) and then against every milestone in the ledger,

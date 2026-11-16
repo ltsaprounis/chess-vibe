@@ -1,14 +1,14 @@
 """The lab's config file: how ``lab attempt`` and ``lab anchor`` run the SPRT runner.
 
-One TOML file holds every setting #192 lists: the time controls, the SPRT
+One TOML file holds every setting the lab needs: the time controls, the SPRT
 bounds, the worker count, the book path and the limits. Every key is
 required and unknown keys are refused, so a misspelt key can't quietly fall
 back to a default. Values are checked as the runner checks its flags, so the
 runner doesn't refuse a run the lab starts after an hour of other work.
 
-The values in the repository's ``lab/lab.toml`` are provisional until #193
-calibrates them. Every ledger entry records the settings that decide its
-verdict, and the config file's SHA-256.
+The values in the repository's ``lab/lab.toml`` are provisional until they're
+calibrated on this machine. Every ledger entry records the settings that
+decide its verdict, and the config file's SHA-256.
 """
 
 from __future__ import annotations

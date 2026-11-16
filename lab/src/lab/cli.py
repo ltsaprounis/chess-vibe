@@ -1,7 +1,7 @@
 """The ``lab`` command line: ``lab attempt``, ``lab anchor`` and ``lab report``.
 
 Built with typer, with its rich formatting and pretty tracebacks turned off,
-so every line is plain and stable for the researcher agent (#194).
+so every line is plain and stable for the researcher agent.
 
 ``lab attempt`` and ``lab anchor`` print exactly one line on stdout: a JSON
 object with the outcome, the check that refused if one did, a message, and

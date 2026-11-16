@@ -1,6 +1,6 @@
 """``lab attempt``: test one candidate through the SPRT runner, and keep or reject it.
 
-The researcher agent (#194) proposes a change as one commit on lab/main's tip
+The researcher agent proposes a change as one commit on lab/main's tip
 that touches only ``engines/lab-engine/``. This module decides its fate, so
 the agent never judges its own results. Each step stops the attempt if it
 fails:

@@ -90,7 +90,7 @@ chess-vibe/
 │           └── pgn_export.py     # PGN export utility
 ├── engines/
 │   ├── random-engine/            # Minimal UCI engine (random legal moves)
-│   ├── lab-engine/               # Python engine the autoresearch loop improves (#190)
+│   ├── lab-engine/               # Python engine the autoresearch loop improves
 │   ├── my-engine/                # HUMAN-ONLY — never touch
 │   └── external/                 # Git submodules (e.g., Stockfish)
 ├── sprt-runner/                  # Custom SPRT testing framework (CLI)
@@ -107,8 +107,8 @@ chess-vibe/
 │       ├── ws/                   # WebSocket handlers (play, SPRT streaming)
 │       ├── routes/               # REST endpoints (games, SPRT, engines)
 │       └── services/             # Business logic (engine_pool, game_manager, sprt_service)
-├── lab/                          # Lab CLI: tests lab-engine candidates, keeps the ledger (#192)
-│   ├── lab.toml                  # Time controls, bounds, workers, book, limits (provisional until #193)
+├── lab/                          # Lab CLI: tests lab-engine candidates, keeps the ledger
+│   ├── lab.toml                  # Time controls, bounds, workers, book, limits (provisional)
 │   └── src/lab/
 │       ├── cli.py                # typer app: attempt, anchor, report
 │       ├── attempt.py            # Steps 1–6 of an attempt, and its record
@@ -134,7 +134,7 @@ chess-vibe/
 ## Key Design Decisions
 
 - **UCI subprocess for everything** — Following the Stockfish/Fishtest/cutechess-cli convention. One code path, language agnosticism, process isolation (engine crash doesn't take down the server), and uniform behaviour between SPRT testing and play.
-- **The lab judges candidates; the researcher agent only proposes them (#192)** — The keep-or-reject rules are ordinary tested code in `lab/`, which drives the runner only as a CLI subprocess. Its ledger is append-only JSONL committed on the local `lab/main` branch, beside the history it describes. It's the lab's own file, not suite data, so it doesn't go through `data/` or the repository ABC. A candidate is recorded once it reaches the SPRT, and an anchor run once its first match starts, whatever happens next; each engine tree gets one attempt and one anchor run, so a result can't be retried into a pass. The lab's own code and config are part of the harness that must be clean. A candidate that isn't accepted is kept under `refs/lab/rejected/<id>`. The lab moves refs in one `update-ref` transaction and never touches a checkout, and `lab anchor` freezes a milestone only when lab/main's tip is clearly stronger than the newest one. The config's time controls and bounds are provisional until #193 calibrates them.
+- **The lab judges candidates; the researcher agent only proposes them** — The keep-or-reject rules are ordinary tested code in `lab/`, which drives the runner only as a CLI subprocess. Its ledger is append-only JSONL committed on the local `lab/main` branch, beside the history it describes. It's the lab's own file, not suite data, so it doesn't go through `data/` or the repository ABC. A candidate is recorded once it reaches the SPRT, and an anchor run once its first match starts, whatever happens next; each engine tree gets one attempt and one anchor run, so a result can't be retried into a pass. The lab's own code and config are part of the harness that must be clean. A candidate that isn't accepted is kept under `refs/lab/rejected/<id>`. The lab moves refs in one `update-ref` transaction and never touches a checkout, and `lab anchor` freezes a milestone only when lab/main's tip is clearly stronger than the newest one. The config's time controls and bounds are provisional until they're calibrated on this machine.
 - **Custom SPRT over cutechess-cli** — Full control over orchestration, progress reporting, and integration with storage/frontend.
 - **Hybrid concurrency for SPRT** — `multiprocessing` for game-level parallelism, `asyncio` inside each worker for non-blocking UCI I/O. Failure isolation and stable timing under load.
 - **Engines don't outlive their game** — Each SPRT worker leads a process group of its own, which the engines it starts join. When the runner terminates a worker (at a decision, a fatal stop, SIGTERM, SIGHUP or Ctrl-C), or finds one dead, it SIGKILLs the worker's group once the worker has exited or been sent SIGKILL. An engine stuck in a loop never reads `quit` or the end of its input, and would otherwise keep a core busy through later runs, skewing their timing without an error. `UCIClient.quit()` likewise kills an engine it can't write `quit` to, or that it's cancelled while waiting for. That covers the processes the runner starts. An engine's own child processes, as behind a `uv run` or `sh` wrapper, can outlive a game that ends normally: `quit()` kills only the process it started, and a finished worker's group isn't killed. Workers are out of the terminal's foreground group, so Ctrl-C and a hangup reach only the runner, whose cleanup ends them; a run started under `nohup` ignores the hangup. When the runner picks the forkserver itself, it starts it, and the resource tracker with it, ignoring SIGHUP, so that both survive a hangup for that cleanup. Ctrl-\ kills the runner without that cleanup, so each worker first finishes its game, and Ctrl-Z stops only the runner.

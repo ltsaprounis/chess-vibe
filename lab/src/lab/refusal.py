@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 # What refused. Each has its own message; these names are stable, for the
-# researcher agent (#194) to act on.
+# researcher agent to act on.
 Check = Literal[
     "repo",
     "config",

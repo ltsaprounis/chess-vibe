@@ -1,8 +1,8 @@
 """Checks the lab's commands make before they play anything.
 
 Each raises :class:`~lab.refusal.Refused` with a message that says what's
-wrong and what would fix it, so the researcher agent (#194) can act on a
-refusal without guessing.
+wrong and what would fix it, so the researcher agent can act on a refusal
+without guessing.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """The lab's verdicts: whether a run's result keeps or rejects a candidate.
 
-These are the rules #192 sets, as plain functions of the runner's report, so
-the agent proposing changes never judges its own results.
+These are the keep-or-reject rules, as plain functions of the runner's report,
+so the agent proposing changes never judges its own results.
 
 An SPRT stage (step 5 or 6 of ``lab attempt``) passes only on H1 with clean
 games. Any game ending in ``engine_crash`` (which includes illegal moves), any

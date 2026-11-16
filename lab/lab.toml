@@ -1,8 +1,8 @@
-# Settings for the lab CLI (#192): how `lab attempt` and `lab anchor` test the
-# lab engine through the SPRT runner.
+# Settings for the lab CLI: how `lab attempt` and `lab anchor` test the lab
+# engine through the SPRT runner.
 #
-# PROVISIONAL: the time controls, bounds and limits below are first guesses.
-# #193 calibrates them on this machine, at the lab engine's real draw rates.
+# PROVISIONAL: the time controls, bounds and limits below are first guesses,
+# until they're calibrated on this machine at the lab engine's real draw rates.
 # Every ledger entry records the settings that decide its verdict, and this
 # file's SHA-256.
 
