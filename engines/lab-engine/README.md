@@ -1,8 +1,7 @@
 # Lab Engine
 
-The baseline engine for the autoresearch loop in
-[#190](https://github.com/ltsaprounis/chess-vibe/issues/190): a UCI chess
-engine written in Python and compiled with [numba](https://numba.pydata.org/).
+The baseline engine for the autoresearch loop: a UCI chess engine written in
+Python and compiled with [numba](https://numba.pydata.org/).
 An agent improves it one change at a time, and the SPRT runner decides whether
 each change helps.
 
@@ -45,8 +44,9 @@ On purpose, these are for the loop to add, one at a time:
 
 Python 3.13, with `numba==0.68.1` and `numpy==2.5.4`. Both have Python 3.13
 wheels for macOS arm64 and Linux x86_64, and numba 0.68.1 declares
-`numpy<2.6,>=1.22`. #190 allows pytorch too; anything else needs a measured case
-and the maintainer's approval, and `python-chess` isn't allowed in the engine.
+`numpy<2.6,>=1.22`. Lab engines may also use pytorch; anything else needs a
+measured case and the maintainer's approval, and `python-chess` isn't allowed in
+the engine.
 
 ## Build and run
 
