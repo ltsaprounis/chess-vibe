@@ -19,6 +19,7 @@ For architecture principles, component boundaries, and the high-level system dia
 | SPRT Runner | Python 3.13+, asyncio + multiprocessing |
 | Shared lib | Python 3.13+, python-chess |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS |
+| Lab CLI | Python 3.13+, typer |
 | Package mgmt | `uv` (Python), `npm` (frontend) |
 | Testing | pytest (Python), Vitest + React Testing Library (frontend) |
 | Linting | Ruff (Python), ESLint + Prettier (TypeScript) |
@@ -37,7 +38,7 @@ Never skip the test-first step. Every public function, route, and component must
 
 ## Testing
 
-### Python (`shared/`, `sprt-runner/`, `backend/`)
+### Python (`shared/`, `sprt-runner/`, `backend/`, `lab/`)
 
 ```bash
 # Run from the component directory with its venv active

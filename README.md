@@ -12,6 +12,7 @@ This project aims to have components that are either 100% AI generated or 100% h
 | SPRT Runner | Python 3.13+, asyncio + multiprocessing |
 | Shared lib | Python 3.13+, python-chess |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS |
+| Lab CLI | Python 3.13+, typer ([lab/README.md](lab/README.md)) |
 
 ## Running Tests
 
@@ -30,6 +31,9 @@ Integration tests require a built `random-engine` venv. To set up:
 ```bash
 make setup         # Builds all components, and every engine in engines.json
 ```
+
+`lab`'s integration tests run git in throwaway repositories and drive the real
+SPRT runner through `sprt-runner/.venv`, which `make setup` builds.
 
 `engines/lab-engine`'s integration tests check move generation against the
 published perft counts up to 200 million nodes, and take about a minute on an

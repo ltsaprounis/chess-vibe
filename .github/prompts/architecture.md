@@ -4,9 +4,9 @@ Architecture principles, ownership boundaries, and high-level component design f
 
 ## Principles
 
-1. **Engines are black boxes.** Every consumer talks UCI over subprocess stdin/stdout. No engine code is ever imported directly. An engine can be Python, C++, Rust — doesn't matter. Copilot builds infrastructure that speaks UCI to opaque engine binaries; the human builds the engine that answers UCI.
-2. **Storage is accessed only through the repository ABC.** No component reads or writes `data/` directly. This makes the `FileStore` → `SQLiteStore` swap possible without touching callers.
-3. **The SPRT runner is a standalone CLI.** The backend invokes it as a subprocess, not a library call. This keeps them independently testable and avoids coupling their async runtimes.
+1. **Engines are black boxes.** Every consumer talks UCI over subprocess stdin/stdout. No engine code is ever imported directly. (The lab's correctness step also runs the lab engine's own test commands, as subprocesses in a worktree.) An engine can be Python, C++, Rust — doesn't matter. Copilot builds infrastructure that speaks UCI to opaque engine binaries; the human builds the engine that answers UCI.
+2. **Storage is accessed only through the repository ABC.** No component reads or writes `data/` directly. (The lab's ledger isn't suite data: it's committed on the local `lab/main` branch.) This makes the `FileStore` → `SQLiteStore` swap possible without touching callers.
+3. **The SPRT runner is a standalone CLI.** The backend and the lab invoke it as a subprocess, not a library call. This keeps them independently testable and avoids coupling their async runtimes.
 4. **The frontend knows only HTTP/WebSocket.** It never talks to engines or storage directly — all interactions go through the backend's REST/WS API.
 5. **Language-agnostic engine registry.** `engines.json` declares how to build and launch each engine. Adding a new engine requires only a new entry — no code changes.
 
@@ -15,17 +15,17 @@ Architecture principles, ownership boundaries, and high-level component design f
 | Owner | Scope | Details |
 |---|---|---|
 | **Human** | `engines/my-engine/` | 100% hand-written. Board representation, move generation, search, evaluation, UCI adapter, and all tests. Fully standalone — zero dependencies on the infrastructure. **Never generate, modify, or refactor any file under this path.** |
-| **Copilot** | Everything else | `shared/`, `engines/random-engine/`, `engines/lab-engine/`, `engines/external/`, `sprt-runner/`, `backend/`, `frontend/`, `scripts/`, `books/`, `data/`, and all project-level config. Builds all infrastructure that drives engines as UCI subprocesses. |
+| **Copilot** | Everything else | `shared/`, `engines/random-engine/`, `engines/lab-engine/`, `engines/external/`, `sprt-runner/`, `backend/`, `frontend/`, `lab/`, `scripts/`, `books/`, `data/`, and all project-level config. Builds all infrastructure that drives engines as UCI subprocesses. |
 
 ## High-Level Architecture
 
 ```
-                    ┌──────────────┐
-                    │   Frontend   │
-                    │   (React)    │
-                    └──────┬───────┘
-                           │ HTTP / WebSocket
-                           ▼
+                    ┌──────────────┐  ┌──────────────────┐
+                    │   Frontend   │  │       Lab        │
+                    │   (React)    │  │      (CLI)       │
+                    └──────┬───────┘  └────────┬─────────┘
+                           │ HTTP / WebSocket  │ CLI subprocess
+                           ▼                   ▼ JSON-lines
 ┌──────────────────┐  CLI subprocess  ┌──────────────────┐
 │     Backend      │─────────────────►│   SPRT Runner    │
 │    (FastAPI)     │   JSON-lines     │     (CLI)        │
@@ -69,6 +69,9 @@ Every component communicates through a well-defined interface. No component reac
 | **SPRT Runner → Engines** | `game.py` → any engine | UCI over stdin/stdout subprocess via `shared/uci_client.py` | Same UCI protocol as backend. Runner manages two engine subprocesses per game. |
 | **SPRT Runner → Storage** | `runner.py` → `--output-dir` | Flat files via `shared.storage` models + `pgn_export` | Game PGNs + eval JSON sidecars written into the `--output-dir` the caller passes; the runner never touches `data/` on its own. Test metadata is persisted by the backend through the repository ABC. |
 | **Backend → Storage** | routes/services → `shared/storage/` | Python API (repository ABC) | Same domain models. Backend calls `get_game()`, `list_games()`, `save_game()`, etc. |
+| **Lab → SPRT Runner** | `lab/runs.py` → `runner.py` | CLI subprocess (stdout) | The lab runs `sprt-runner/.venv/bin/python -m sprt_runner run --base lab-engine:<base> --test lab-engine:<candidate> ... --max-games N` from the repository root, with `--no-early-stop` for `lab anchor`'s fixed-length matches, and reads `start`, `progress`, `error`, `complete` and `interrupted`. It never imports the runner. |
+| **Lab → Engines** | `lab/correctness.py` → `engines/lab-engine/` | Commands in a temporary worktree | Step 4 of `lab attempt` runs the configured commands, the engine's own tests and deep perft, as subprocesses in a detached worktree at the candidate. The lab never imports engine code. |
+| **Lab → Ledger and refs** | `lab/ledger.py`, `lab/git.py` → git | git plumbing | The ledger is the lab's own file, not suite data, so it doesn't go through `data/` or the repository ABC: `lab/ledger.jsonl`, committed on the local `lab/main` branch beside the history it describes. Rejected candidates are kept under `refs/lab/rejected/<id>`. No checkout is touched, and nothing is pushed. |
 | **Engine Registry** | Backend + SPRT Runner → `engines.json` | JSON config file | Engine id, name, directory, build command, run command. Read at startup; adding a new engine requires only a new entry. |
 | **Storage → Filesystem** | `file_store.py` → `data/` | Flat files (PGN + JSON sidecars) | Hidden behind the repository ABC. Callers never touch the filesystem directly. Swappable to SQLite later. |
 
@@ -76,7 +79,7 @@ Every component communicates through a well-defined interface. No component reac
 
 ```
 chess-vibe/
-├── shared/                   # Shared Python package (installed by sprt-runner & backend)
+├── shared/                   # Shared Python package (installed by sprt-runner, backend & lab)
 │   └── src/shared/
 │       ├── uci_client.py         # Async UCI subprocess wrapper
 │       ├── time_control.py       # Time control models
@@ -104,6 +107,18 @@ chess-vibe/
 │       ├── ws/                   # WebSocket handlers (play, SPRT streaming)
 │       ├── routes/               # REST endpoints (games, SPRT, engines)
 │       └── services/             # Business logic (engine_pool, game_manager, sprt_service)
+├── lab/                          # Lab CLI: tests lab-engine candidates, keeps the ledger (#192)
+│   ├── lab.toml                  # Time controls, bounds, workers, book, limits (provisional until #193)
+│   └── src/lab/
+│       ├── cli.py                # typer app: attempt, anchor, report
+│       ├── attempt.py            # Steps 1–6 of an attempt, and its record
+│       ├── anchor.py             # Fixed-length matches against the milestones
+│       ├── report.py             # The ledger summed up
+│       ├── verdict.py            # The keep-or-reject rules
+│       ├── correctness.py        # Step 4: the candidate's own checks, in a worktree
+│       ├── runs.py               # The runner as a CLI subprocess, and its JSON-lines
+│       ├── ledger.py             # Append-only JSONL entries
+│       └── git.py                # Refs and ledger commits, without touching a checkout
 ├── frontend/                     # React + TypeScript + Vite + Tailwind
 │   └── src/
 │       ├── components/           # Board, EvalBar, MoveList, SPRTDashboard
@@ -119,6 +134,7 @@ chess-vibe/
 ## Key Design Decisions
 
 - **UCI subprocess for everything** — Following the Stockfish/Fishtest/cutechess-cli convention. One code path, language agnosticism, process isolation (engine crash doesn't take down the server), and uniform behaviour between SPRT testing and play.
+- **The lab judges candidates; the researcher agent only proposes them (#192)** — The keep-or-reject rules are ordinary tested code in `lab/`, which drives the runner only as a CLI subprocess. Its ledger is append-only JSONL committed on the local `lab/main` branch, beside the history it describes. It's the lab's own file, not suite data, so it doesn't go through `data/` or the repository ABC. A candidate is recorded once it reaches the SPRT, and an anchor run once its first match starts, whatever happens next; each engine tree gets one attempt and one anchor run, so a result can't be retried into a pass. The lab's own code and config are part of the harness that must be clean. A candidate that isn't accepted is kept under `refs/lab/rejected/<id>`. The lab moves refs in one `update-ref` transaction and never touches a checkout, and `lab anchor` freezes a milestone only when lab/main's tip is clearly stronger than the newest one. The config's time controls and bounds are provisional until #193 calibrates them.
 - **Custom SPRT over cutechess-cli** — Full control over orchestration, progress reporting, and integration with storage/frontend.
 - **Hybrid concurrency for SPRT** — `multiprocessing` for game-level parallelism, `asyncio` inside each worker for non-blocking UCI I/O. Failure isolation and stable timing under load.
 - **Engines don't outlive their game** — Each SPRT worker leads a process group of its own, which the engines it starts join. When the runner terminates a worker (at a decision, a fatal stop, SIGTERM, SIGHUP or Ctrl-C), or finds one dead, it SIGKILLs the worker's group once the worker has exited or been sent SIGKILL. An engine stuck in a loop never reads `quit` or the end of its input, and would otherwise keep a core busy through later runs, skewing their timing without an error. `UCIClient.quit()` likewise kills an engine it can't write `quit` to, or that it's cancelled while waiting for. That covers the processes the runner starts. An engine's own child processes, as behind a `uv run` or `sh` wrapper, can outlive a game that ends normally: `quit()` kills only the process it started, and a finished worker's group isn't killed. Workers are out of the terminal's foreground group, so Ctrl-C and a hangup reach only the runner, whose cleanup ends them; a run started under `nohup` ignores the hangup. When the runner picks the forkserver itself, it starts it, and the resource tracker with it, ignoring SIGHUP, so that both survive a hangup for that cleanup. Ctrl-\ kills the runner without that cleanup, so each worker first finishes its game, and Ctrl-Z stops only the runner.

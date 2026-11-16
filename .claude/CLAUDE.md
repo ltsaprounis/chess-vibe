@@ -24,8 +24,10 @@ infrastructure never imports engine code.
 
 - Python 3.13 components: `shared/` (python-chess, UCI client,
   repository ABC storage), `sprt-runner/` (asyncio + multiprocessing
-  CLI), `backend/` (FastAPI + uvicorn). Tooling: uv, ruff (pinned,
-  see Makefile `RUFF_VERSION`), pyright strict, pytest.
+  CLI), `backend/` (FastAPI + uvicorn), `lab/` (typer CLI that tests
+  lab-engine candidates through the runner and keeps the ledger).
+  Tooling: uv, ruff (pinned, see Makefile `RUFF_VERSION`), pyright
+  strict, pytest.
 - Frontend (`frontend/` only): React 19 + TypeScript + Vite +
   Tailwind — npm, ESLint, Prettier, Vitest + React Testing Library.
 - Each component has its own venv; cross-component calls go through
@@ -55,6 +57,8 @@ verification gates:
 | backend-dev     | `backend/` — FastAPI REST/WS + services                                                                |
 | frontend-dev    | `frontend/` — React UI                                                                                 |
 | engines-dev     | `engines/random-engine/`, `engines/lab-engine/`, `engines/external/`, `engines.json` — never my-engine |
+
+No sub-agent owns `lab/`: work on it in the main session.
 
 One cross-cutting agent sits apart from the table:
 `boundary-reviewer` (read-only) reviews a diff
@@ -90,11 +94,16 @@ When to delegate:
   human's project; the suite's job is to drive it over UCI.
 - Engines are black boxes: every consumer speaks UCI over subprocess
   stdin/stdout via `shared/uci_client.py`. No component ever imports
-  engine code, and engines never import infrastructure.
+  engine code, and engines never import infrastructure. (The lab's
+  correctness step also runs the lab engine's own test commands as
+  subprocesses in a worktree.)
 - Storage goes through the repository ABC (`shared/storage/`) only.
-  No component reads or writes `data/` paths directly.
-- The SPRT runner is a standalone CLI. The backend invokes it as a
-  subprocess and reads JSON-lines from stdout — never as a library.
+  No component reads or writes `data/` paths directly. (The lab's
+  ledger isn't suite data: it's committed on the local `lab/main`
+  branch.)
+- The SPRT runner is a standalone CLI. The backend and the lab invoke
+  it as a subprocess and read JSON-lines from stdout — never as a
+  library.
 - The frontend knows only the backend's HTTP/WS API. API responses
   never expose filesystem paths or shell commands.
 - Strict TDD (red → green → refactor); pyright strict and ruff must

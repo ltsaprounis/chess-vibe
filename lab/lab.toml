@@ -1,0 +1,54 @@
+# Settings for the lab CLI (#192): how `lab attempt` and `lab anchor` test the
+# lab engine through the SPRT runner.
+#
+# PROVISIONAL: the time controls, bounds and limits below are first guesses.
+# #193 calibrates them on this machine, at the lab engine's real draw rates.
+# Every ledger entry records the settings that decide its verdict, and this
+# file's SHA-256.
+
+# Games the runner plays at once (its --concurrency).
+concurrency = 9
+
+# The opening book, relative to the repository root. The runner reads it from
+# the working tree, and every ledger entry records its SHA-256.
+book = "books/2moves_v1.epd"
+
+# Step 4 of `lab attempt`: commands run, without a shell, in
+# engines/lab-engine/ of a temporary worktree at the candidate commit. Each
+# must exit 0 within the time limit, which covers all of them together.
+[correctness]
+commands = [
+    ["uv", "run", "--python", "3.13", "pytest", "-q", "-m", "not integration"],
+    ["uv", "run", "--python", "3.13", "pytest", "-q", "-m", "integration", "tests/test_perft_deep.py"],
+]
+timeout_minutes = 20
+
+# Step 5: the fast SPRT. A candidate must reach H1 here before step 6 runs.
+[fast]
+tc = "wtime=10000,btime=10000,winc=100,binc=100"
+elo0 = 0.0
+elo1 = 10.0
+alpha = 0.05
+beta = 0.05
+max_games = 4000
+max_time_losses = 0
+timeout_minutes = 360
+
+# Step 6: the confirmation SPRT, at a longer time control.
+[confirm]
+tc = "wtime=40000,btime=40000,winc=400,binc=400"
+elo0 = 0.0
+elo1 = 10.0
+alpha = 0.05
+beta = 0.05
+max_games = 4000
+max_time_losses = 0
+timeout_minutes = 1440
+
+# `lab anchor`: a fixed-length match against random-engine and against each
+# milestone. The time limit applies to each match.
+[anchor]
+tc = "wtime=10000,btime=10000,winc=100,binc=100"
+games = 400
+max_time_losses = 0
+timeout_minutes = 180

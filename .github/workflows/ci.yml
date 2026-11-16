@@ -67,6 +67,9 @@ jobs:
       - name: Type-check engines/lab-engine
         run: cd engines/lab-engine && uv sync --dev && uv run pyright
 
+      - name: Type-check lab
+        run: cd lab && uv sync --dev && uv run pyright
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -90,6 +93,7 @@ jobs:
           - engines/lab-engine
           - sprt-runner
           - backend
+          - lab
     steps:
       - uses: actions/checkout@v4
 
@@ -118,6 +122,7 @@ jobs:
           - sprt-runner
           - backend
           - engines/lab-engine
+          - lab
     steps:
       - uses: actions/checkout@v4
 
@@ -131,6 +136,11 @@ jobs:
           cd engines/random-engine
           uv venv .venv --python 3.13
           uv pip install --python .venv/bin/python -e .
+
+      # The lab's end-to-end tests drive the real runner CLI through its venv.
+      - name: Install the runner's venv
+        if: matrix.component == 'lab'
+        run: cd sprt-runner && uv sync
 
       - name: Install dependencies
         run: cd ${{ matrix.component }} && uv sync --dev

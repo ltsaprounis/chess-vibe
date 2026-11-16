@@ -3,7 +3,7 @@
 # Targets: help, setup, build-engines, test, test-integration, test-all, lint,
 #          dev, dev-backend, dev-frontend, clean
 
-PYTHON_COMPONENTS := shared sprt-runner backend
+PYTHON_COMPONENTS := shared sprt-runner backend lab
 ENGINE_COMPONENTS := engines/random-engine engines/lab-engine
 PYTHON_VERSION    := 3.13
 RUFF_VERSION      := 0.16.1

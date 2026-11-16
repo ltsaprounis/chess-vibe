@@ -29,13 +29,15 @@ Checklist — verify each against the actual diff, not vibes:
   any change there is an instant blocker, whoever asked for it.
 - **Engine black box**: no infrastructure imports engine code and
   no engine imports infrastructure; all engine interaction goes
-  through `shared/uci_client.py` UCI subprocesses. Engines are
+  through `shared/uci_client.py` UCI subprocesses, apart from the
+  lab's correctness step, which runs the lab engine's own test
+  commands as subprocesses in a worktree. Engines are
   registered only via `engines.json` (validate against
   `engines.schema.json`).
 - **Boundaries**: storage only via the repository ABC — data-dir
   path literals belong only in `shared/storage/` and composition
   (`backend/src/backend/main.py`'s default data dir); the runner
-  writes only inside its `--output-dir`; backend reaches
+  writes only inside its `--output-dir`; backend and lab reach
   the runner only as a subprocess (no `sprt_runner` imports);
   frontend talks only HTTP/WS (no backend imports, no hardcoded
   origins — the Vite proxy handles routing). Changes to shared
